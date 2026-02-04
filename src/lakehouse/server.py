@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows
 from .query import QueryEngine
 
 
@@ -112,6 +112,33 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name", "rows"],
+            },
+        ),
+        Tool(
+            name="update",
+            description=(
+                "Update rows in an Iceberg table that match a filter condition. "
+                "Provide table name, a SQL WHERE clause filter, and column updates. "
+                "Example filter: \"category = 'groceries'\" or \"id = 5\". "
+                "Example updates: {\"amount\": 100.0, \"currency\": \"EUR\"}"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to update (e.g., 'expenses')",
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "SQL WHERE clause to identify rows to update (e.g., \"id = 5\")",
+                    },
+                    "updates": {
+                        "type": "object",
+                        "description": "Object with column names as keys and new values as values",
+                    },
+                },
+                "required": ["table_name", "filter", "updates"],
             },
         ),
     ]
@@ -246,6 +273,59 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Insert failed: {str(e)}",
+                )]
+
+        elif name == "update":
+            table_name = arguments.get("table_name")
+            filter_expr = arguments.get("filter")
+            updates = arguments.get("updates")
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            if not filter_expr:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'filter' parameter is required",
+                )]
+
+            if not updates or not isinstance(updates, dict):
+                return [TextContent(
+                    type="text",
+                    text="Error: 'updates' parameter is required and must be an object",
+                )]
+
+            try:
+                catalog = get_catalog()
+                row_count = update_rows(catalog, table_name, filter_expr, updates)
+
+                # Refresh the query engine to pick up changes
+                engine = get_engine()
+                engine.refresh()
+
+                if row_count == 0:
+                    return [TextContent(
+                        type="text",
+                        text=f"No rows matched the filter `{filter_expr}` in `{table_name}`.",
+                    )]
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ Successfully updated {row_count} row(s) in `{table_name}`.",
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Update error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Update failed: {str(e)}",
                 )]
 
         else:

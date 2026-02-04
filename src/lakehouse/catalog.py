@@ -269,6 +269,178 @@ def insert_rows(
     return len(rows)
 
 
+def update_rows(
+    catalog: Catalog,
+    table_name: str,
+    filter_expr: str,
+    updates: dict,
+) -> int:
+    """Update rows in an Iceberg table matching a filter.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        filter_expr: SQL WHERE clause (e.g., "id = 5" or "category = 'groceries'")
+        updates: Dictionary of column names to new values
+
+    Returns:
+        Number of rows updated
+
+    Raises:
+        ValueError: If table doesn't exist or filter/updates are invalid
+    """
+    import datetime
+    import duckdb
+
+    if not filter_expr:
+        raise ValueError("Filter expression is required for UPDATE operations")
+
+    if not updates:
+        raise ValueError("Updates dictionary cannot be empty")
+
+    # Normalize table name
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    # Load table
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    schema = table.schema()
+    field_names = {field.name for field in schema.fields}
+
+    # Validate update columns exist
+    for col in updates.keys():
+        if col not in field_names:
+            raise ValueError(f"Column '{col}' does not exist in table '{table_name}'")
+
+    # Read all data from the table
+    try:
+        arrow_table = table.scan().to_arrow()
+    except Exception:
+        # Table might be empty
+        return 0
+
+    if arrow_table.num_rows == 0:
+        return 0
+
+    # Use DuckDB to identify matching rows and apply updates
+    conn = duckdb.connect(":memory:")
+    conn.register("source_table", arrow_table)
+
+    # Count matching rows first
+    count_result = conn.execute(f"SELECT COUNT(*) FROM source_table WHERE {filter_expr}").fetchone()
+    match_count = count_result[0] if count_result else 0
+
+    if match_count == 0:
+        conn.close()
+        return 0
+
+    # Build the UPDATE-like SELECT query
+    # We select all columns, replacing updated ones with new values for matching rows
+    select_parts = []
+    for field in schema.fields:
+        col_name = field.name
+        if col_name in updates:
+            new_value = updates[col_name]
+            # Format value for SQL
+            if new_value is None:
+                formatted_value = "NULL"
+            elif isinstance(new_value, str):
+                # Escape single quotes
+                escaped = new_value.replace("'", "''")
+                formatted_value = f"'{escaped}'"
+            elif isinstance(new_value, (datetime.date, datetime.datetime)):
+                formatted_value = f"'{new_value.isoformat()}'"
+            else:
+                formatted_value = str(new_value)
+
+            # Use CASE to conditionally update
+            select_parts.append(
+                f"CASE WHEN {filter_expr} THEN {formatted_value} ELSE \"{col_name}\" END AS \"{col_name}\""
+            )
+        else:
+            select_parts.append(f"\"{col_name}\"")
+
+    select_sql = f"SELECT {', '.join(select_parts)} FROM source_table"
+
+    # Execute and get updated table
+    updated_arrow = conn.execute(select_sql).fetch_arrow_table()
+    conn.close()
+
+    # Overwrite the table with updated data
+    table.overwrite(updated_arrow)
+
+    return match_count
+
+
+def delete_rows(
+    catalog: Catalog,
+    table_name: str,
+    filter_expr: str,
+) -> int:
+    """Delete rows from an Iceberg table matching a filter.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        filter_expr: SQL WHERE clause (e.g., "id = 5" or "category = 'groceries'")
+
+    Returns:
+        Number of rows deleted
+
+    Raises:
+        ValueError: If table doesn't exist or filter is invalid
+    """
+    import duckdb
+
+    if not filter_expr:
+        raise ValueError("Filter expression is required for DELETE operations")
+
+    # Normalize table name
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    # Load table
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    # Read all data from the table
+    try:
+        arrow_table = table.scan().to_arrow()
+    except Exception:
+        # Table might be empty
+        return 0
+
+    if arrow_table.num_rows == 0:
+        return 0
+
+    # Use DuckDB to filter out matching rows
+    conn = duckdb.connect(":memory:")
+    conn.register("source_table", arrow_table)
+
+    # Count matching rows first
+    count_result = conn.execute(f"SELECT COUNT(*) FROM source_table WHERE {filter_expr}").fetchone()
+    match_count = count_result[0] if count_result else 0
+
+    if match_count == 0:
+        conn.close()
+        return 0
+
+    # Select rows that DON'T match the filter (i.e., keep these)
+    remaining_arrow = conn.execute(f"SELECT * FROM source_table WHERE NOT ({filter_expr})").fetch_arrow_table()
+    conn.close()
+
+    # Overwrite the table with remaining data
+    table.overwrite(remaining_arrow)
+
+    return match_count
+
+
 def insert_sample_data(catalog: Catalog) -> None:
     """Insert sample data into tables."""
     import datetime
