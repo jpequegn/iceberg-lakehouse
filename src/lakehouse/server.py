@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows
 from .query import QueryEngine
 
 
@@ -88,6 +88,30 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        Tool(
+            name="insert",
+            description=(
+                "Insert rows into an Iceberg table. "
+                "Provide table name and an array of row objects. "
+                "Each row object should have keys matching the table's column names. "
+                "Missing optional fields will be set to null."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to insert into (e.g., 'expenses' or 'default.expenses')",
+                    },
+                    "rows": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Array of row objects to insert",
+                    },
+                },
+                "required": ["table_name", "rows"],
             },
         ),
     ]
@@ -177,6 +201,52 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 type="text",
                 text="Table data refreshed successfully.",
             )]
+
+        elif name == "insert":
+            table_name = arguments.get("table_name")
+            rows = arguments.get("rows")
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            if not rows:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'rows' parameter is required and must not be empty",
+                )]
+
+            if not isinstance(rows, list):
+                return [TextContent(
+                    type="text",
+                    text="Error: 'rows' must be an array of objects",
+                )]
+
+            try:
+                catalog = get_catalog()
+                row_count = insert_rows(catalog, table_name, rows)
+
+                # Refresh the query engine to pick up new data
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ Successfully inserted {row_count} row(s) into `{table_name}`.",
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Insert error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Insert failed: {str(e)}",
+                )]
 
         else:
             return [TextContent(

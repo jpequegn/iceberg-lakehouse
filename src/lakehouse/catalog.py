@@ -160,6 +160,115 @@ def create_sample_tables(catalog: Catalog) -> None:
             raise
 
 
+def insert_rows(
+    catalog: Catalog,
+    table_name: str,
+    rows: list[dict],
+) -> int:
+    """Insert rows into an Iceberg table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        rows: List of dictionaries, each representing a row
+
+    Returns:
+        Number of rows inserted
+
+    Raises:
+        ValueError: If table doesn't exist or rows are invalid
+    """
+    import datetime
+
+    if not rows:
+        return 0
+
+    # Normalize table name
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    # Load table and get schema
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    schema = table.schema()
+
+    # Build column arrays from rows
+    columns: dict[str, list] = {field.name: [] for field in schema.fields}
+
+    for row in rows:
+        for field in schema.fields:
+            value = row.get(field.name)
+            columns[field.name].append(value)
+
+    # Convert to PyArrow arrays with proper types
+    arrow_arrays = {}
+    for field in schema.fields:
+        values = columns[field.name]
+        field_type = str(field.field_type)
+
+        try:
+            if field_type == "long":
+                # Convert to int, handling None
+                converted = [int(v) if v is not None else None for v in values]
+                arrow_arrays[field.name] = pa.array(converted, type=pa.int64())
+
+            elif field_type == "double":
+                # Convert to float, handling None
+                converted = [float(v) if v is not None else None for v in values]
+                arrow_arrays[field.name] = pa.array(converted, type=pa.float64())
+
+            elif field_type == "string":
+                # Convert to string, handling None
+                converted = [str(v) if v is not None else None for v in values]
+                arrow_arrays[field.name] = pa.array(converted, type=pa.string())
+
+            elif field_type == "date":
+                # Parse date strings or pass through date objects
+                converted = []
+                for v in values:
+                    if v is None:
+                        converted.append(None)
+                    elif isinstance(v, datetime.date):
+                        converted.append(v)
+                    elif isinstance(v, str):
+                        # Parse ISO format date string
+                        converted.append(datetime.date.fromisoformat(v))
+                    else:
+                        converted.append(None)
+                arrow_arrays[field.name] = pa.array(converted, type=pa.date32())
+
+            elif field_type.startswith("timestamp"):
+                # Parse timestamp strings or pass through datetime objects
+                converted = []
+                for v in values:
+                    if v is None:
+                        converted.append(None)
+                    elif isinstance(v, datetime.datetime):
+                        converted.append(v)
+                    elif isinstance(v, str):
+                        # Parse ISO format timestamp string
+                        converted.append(datetime.datetime.fromisoformat(v))
+                    else:
+                        converted.append(None)
+                arrow_arrays[field.name] = pa.array(converted, type=pa.timestamp("us"))
+
+            else:
+                # Default: try as-is
+                arrow_arrays[field.name] = pa.array(values)
+
+        except Exception as e:
+            raise ValueError(f"Error converting column '{field.name}': {e}")
+
+    # Create Arrow table and append
+    arrow_table = pa.table(arrow_arrays)
+    table.append(arrow_table)
+
+    return len(rows)
+
+
 def insert_sample_data(catalog: Catalog) -> None:
     """Insert sample data into tables."""
     import datetime
