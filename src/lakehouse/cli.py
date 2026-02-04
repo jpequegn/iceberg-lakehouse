@@ -1,0 +1,203 @@
+"""CLI for Iceberg Lakehouse."""
+
+import click
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+
+console = Console()
+
+
+@click.group()
+@click.version_option(version="0.1.0")
+def main():
+    """Iceberg Lakehouse - Local-first data lakehouse with LLM access."""
+    pass
+
+
+@main.command()
+@click.option("--with-sample-data", is_flag=True, help="Insert sample data")
+def init(with_sample_data: bool):
+    """Initialize the lakehouse (create catalog and tables)."""
+    from .catalog import (
+        get_catalog,
+        init_catalog,
+        create_sample_tables,
+        insert_sample_data,
+    )
+
+    console.print("[bold blue]Initializing Iceberg Lakehouse...[/bold blue]")
+
+    # Get/create catalog
+    catalog = get_catalog()
+    console.print("  ✓ Catalog created")
+
+    # Initialize namespace
+    init_catalog(catalog)
+    console.print("  ✓ Namespace 'default' created")
+
+    # Create sample tables
+    create_sample_tables(catalog)
+    console.print("  ✓ Sample tables created (expenses, health, notes)")
+
+    if with_sample_data:
+        insert_sample_data(catalog)
+        console.print("  ✓ Sample data inserted")
+
+    console.print("\n[bold green]✓ Lakehouse initialized successfully![/bold green]")
+    console.print("\nNext steps:")
+    console.print("  • Query data: [cyan]lakehouse query 'SELECT * FROM expenses'[/cyan]")
+    console.print("  • Start MCP server: [cyan]lakehouse serve[/cyan]")
+
+
+@main.command()
+@click.argument("sql")
+@click.option("--max-rows", default=100, help="Maximum rows to return")
+@click.option("--format", "output_format", type=click.Choice(["table", "csv", "json"]), default="table")
+def query(sql: str, max_rows: int, output_format: str):
+    """Execute a SQL query against the lakehouse."""
+    from .query import execute_query
+
+    try:
+        result = execute_query(sql, max_rows=max_rows)
+
+        if result.empty:
+            console.print("[yellow]Query returned no results.[/yellow]")
+            return
+
+        if output_format == "table":
+            table = Table(show_header=True, header_style="bold magenta")
+            for col in result.columns:
+                table.add_column(str(col))
+            for _, row in result.iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+
+        elif output_format == "csv":
+            print(result.to_csv(index=False))
+
+        elif output_format == "json":
+            print(result.to_json(orient="records", indent=2))
+
+        console.print(f"\n[dim]({len(result)} rows)[/dim]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
+def tables():
+    """List all tables in the lakehouse."""
+    from .catalog import get_catalog, list_tables
+
+    catalog = get_catalog()
+    table_list = list_tables(catalog)
+
+    if not table_list:
+        console.print("[yellow]No tables found. Run 'lakehouse init' first.[/yellow]")
+        return
+
+    console.print("[bold]Available Tables:[/bold]\n")
+    for t in table_list:
+        console.print(f"  • {t}")
+
+
+@main.command()
+@click.argument("table_name")
+def describe(table_name: str):
+    """Describe a table's schema."""
+    from .catalog import get_catalog, get_table_schema
+
+    catalog = get_catalog()
+
+    try:
+        schema = get_table_schema(catalog, table_name)
+
+        console.print(Panel(f"[bold]{schema['name']}[/bold]"))
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Field")
+        table.add_column("Type")
+        table.add_column("Required")
+
+        for field in schema["fields"]:
+            table.add_row(
+                field["name"],
+                field["type"],
+                "✓" if field["required"] else "",
+            )
+
+        console.print(table)
+        console.print(f"\nPartition: {schema['partition_spec']}")
+        console.print(f"Snapshots: {schema['snapshots']}")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
+@click.option("--host", default="localhost", help="Host to bind to")
+@click.option("--port", default=8765, help="Port for SSE transport (not used for stdio)")
+def serve(host: str, port: int):
+    """Start the MCP server for LLM access."""
+    from .server import main as server_main
+
+    console.print("[bold blue]Starting MCP Server...[/bold blue]")
+    console.print("Transport: stdio (for Claude Desktop)")
+    console.print("\nAdd to Claude Desktop config:")
+    console.print(Panel('''{
+  "mcpServers": {
+    "lakehouse": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/iceberg-lakehouse", "run", "lakehouse", "serve"]
+    }
+  }
+}''', title="claude_desktop_config.json"))
+
+    # Run the server
+    server_main()
+
+
+@main.command()
+@click.argument("file_path", type=click.Path(exists=True))
+@click.argument("table_name")
+@click.option("--format", "file_format", type=click.Choice(["csv", "json", "parquet"]), default="csv")
+def ingest(file_path: str, table_name: str, file_format: str):
+    """Ingest data from a file into an Iceberg table."""
+    import pandas as pd
+    import pyarrow as pa
+    from .catalog import get_catalog
+
+    console.print(f"[bold blue]Ingesting {file_path} into {table_name}...[/bold blue]")
+
+    # Read file
+    if file_format == "csv":
+        df = pd.read_csv(file_path)
+    elif file_format == "json":
+        df = pd.read_json(file_path)
+    elif file_format == "parquet":
+        df = pd.read_parquet(file_path)
+
+    # Convert to Arrow
+    arrow_table = pa.Table.from_pandas(df)
+
+    # Get catalog and table
+    catalog = get_catalog()
+
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+        table.append(arrow_table)
+        console.print(f"[bold green]✓ Ingested {len(df)} rows into {table_name}[/bold green]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+if __name__ == "__main__":
+    main()
