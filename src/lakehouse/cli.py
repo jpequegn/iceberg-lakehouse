@@ -302,6 +302,54 @@ def expire(table_name: str, older_than: str, retain_last: int):
         raise click.Abort()
 
 
+@main.command()
+@click.argument("json_operations")
+def batch(json_operations: str):
+    """Execute multiple operations as a batch.
+
+    JSON_OPERATIONS is a JSON array of operation objects. Each needs:
+    action (insert/update/delete), table_name, and action-specific fields.
+
+    Example:
+        lakehouse batch '[{"action":"insert","table_name":"expenses","rows":[{"id":10,"amount":50}]},{"action":"delete","table_name":"expenses","filter":"id = 3"}]'
+    """
+    import json
+    from .catalog import get_catalog, execute_batch
+
+    try:
+        operations = json.loads(json_operations)
+    except json.JSONDecodeError as e:
+        console.print(f"[bold red]Error:[/bold red] Invalid JSON: {e}")
+        raise click.Abort()
+
+    if not isinstance(operations, list) or not operations:
+        console.print("[bold red]Error:[/bold red] JSON must be a non-empty array of operations")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        results = execute_batch(catalog, operations)
+
+        ok_count = sum(1 for r in results if r["status"] == "ok")
+        err_count = sum(1 for r in results if r["status"] == "error")
+        skip_count = sum(1 for r in results if r["status"] == "skipped")
+
+        console.print(f"\n[bold]Batch: {ok_count} succeeded, {err_count} failed, {skip_count} skipped[/bold]\n")
+
+        for r in results:
+            if r["status"] == "ok":
+                console.print(f"  [green]✓[/green] [{r['index']}] {r['action']} on {r['table']}: {r['rows_affected']} rows")
+            elif r["status"] == "error":
+                console.print(f"  [red]✗[/red] [{r['index']}] {r.get('action', '?')}: {r['message']}")
+            else:
+                console.print(f"  [dim]⊘[/dim] [{r['index']}] {r['message']}")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.group()
 @click.argument("table_name")
 @click.pass_context
