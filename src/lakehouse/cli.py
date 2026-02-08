@@ -199,5 +199,65 @@ def ingest(file_path: str, table_name: str, file_format: str):
         raise click.Abort()
 
 
+@main.command()
+@click.argument("table_name")
+@click.argument("filter_expr")
+@click.option("--force", is_flag=True, help="Skip confirmation prompt")
+def delete(table_name: str, filter_expr: str, force: bool):
+    """Delete rows from a table matching a filter.
+
+    TABLE_NAME is the table to delete from (e.g., 'expenses').
+    FILTER_EXPR is a SQL WHERE clause (e.g., "id = 5").
+    """
+    from .catalog import get_catalog, delete_rows
+
+    catalog = get_catalog()
+
+    if not force:
+        # Show matching rows first
+        from .query import execute_query
+
+        if "." not in table_name:
+            qualified = f"default.{table_name}"
+        else:
+            qualified = table_name
+
+        short_name = table_name.split(".")[-1] if "." in table_name else table_name
+
+        try:
+            preview = execute_query(f"SELECT * FROM {short_name} WHERE {filter_expr}", max_rows=20)
+            if preview.empty:
+                console.print("[yellow]No rows match the filter. Nothing to delete.[/yellow]")
+                return
+
+            console.print(f"[bold]Rows to delete from {qualified}:[/bold]\n")
+            table = Table(show_header=True, header_style="bold red")
+            for col in preview.columns:
+                table.add_column(str(col))
+            for _, row in preview.iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+            console.print(f"\n[bold red]{len(preview)} row(s) will be deleted.[/bold red]")
+
+        except Exception as e:
+            console.print(f"[yellow]Could not preview rows: {e}[/yellow]")
+
+        if not click.confirm("Proceed with deletion?"):
+            console.print("[dim]Aborted.[/dim]")
+            return
+
+    try:
+        row_count = delete_rows(catalog, table_name, filter_expr)
+
+        if row_count == 0:
+            console.print("[yellow]No rows matched the filter.[/yellow]")
+        else:
+            console.print(f"[bold green]✓ Deleted {row_count} row(s) from {table_name}.[/bold green]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 if __name__ == "__main__":
     main()

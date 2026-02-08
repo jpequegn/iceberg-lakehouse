@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows
 from .query import QueryEngine
 
 
@@ -139,6 +139,29 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name", "filter", "updates"],
+            },
+        ),
+        Tool(
+            name="delete",
+            description=(
+                "Delete rows from an Iceberg table that match a filter condition. "
+                "Provide table name and a SQL WHERE clause filter. "
+                "A filter is always required to prevent accidental full table deletes. "
+                "Example filter: \"category = 'groceries'\" or \"id = 5\"."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to delete from (e.g., 'expenses')",
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "SQL WHERE clause to identify rows to delete (e.g., \"id = 5\")",
+                    },
+                },
+                "required": ["table_name", "filter"],
             },
         ),
     ]
@@ -326,6 +349,52 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Update failed: {str(e)}",
+                )]
+
+        elif name == "delete":
+            table_name = arguments.get("table_name")
+            filter_expr = arguments.get("filter")
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            if not filter_expr:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'filter' parameter is required (use the query tool to inspect data before deleting)",
+                )]
+
+            try:
+                catalog = get_catalog()
+                row_count = delete_rows(catalog, table_name, filter_expr)
+
+                # Refresh the query engine to pick up changes
+                engine = get_engine()
+                engine.refresh()
+
+                if row_count == 0:
+                    return [TextContent(
+                        type="text",
+                        text=f"No rows matched the filter `{filter_expr}` in `{table_name}`.",
+                    )]
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ Successfully deleted {row_count} row(s) from `{table_name}`.",
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Delete error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Delete failed: {str(e)}",
                 )]
 
         else:
