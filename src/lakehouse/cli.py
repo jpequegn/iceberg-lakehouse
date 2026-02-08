@@ -249,6 +249,59 @@ def ingest(file_path: str, table_name: str, file_format: str):
         raise click.Abort()
 
 
+@main.command()
+@click.argument("table_name")
+@click.option("--snapshot-id", type=int, default=None, help="Snapshot ID to rollback to")
+@click.option("--timestamp", default=None, help="ISO timestamp to rollback to")
+def rollback(table_name: str, snapshot_id: int, timestamp: str):
+    """Rollback a table to a previous snapshot.
+
+    Use 'lakehouse snapshots TABLE' to list available snapshots first.
+    """
+    from .catalog import get_catalog, rollback_table
+
+    if not snapshot_id and not timestamp:
+        console.print("[bold red]Error:[/bold red] Either --snapshot-id or --timestamp is required")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        result = rollback_table(catalog, table_name, snapshot_id=snapshot_id, timestamp=timestamp)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
+@click.argument("table_name")
+@click.option("--older-than", default=None, help="Expire snapshots older than this (ISO timestamp or duration like '30d')")
+@click.option("--retain-last", type=int, default=None, help="Minimum snapshots to keep")
+def expire(table_name: str, older_than: str, retain_last: int):
+    """Expire old snapshots to free storage.
+
+    Examples:
+        lakehouse expire expenses --older-than 30d
+        lakehouse expire expenses --retain-last 5
+        lakehouse expire expenses --older-than 7d --retain-last 3
+    """
+    from .catalog import get_catalog, expire_snapshots
+
+    if not older_than and not retain_last:
+        console.print("[bold red]Error:[/bold red] Either --older-than or --retain-last is required")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        result = expire_snapshots(catalog, table_name, older_than=older_than, retain_last=retain_last)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.group()
 @click.argument("table_name")
 @click.pass_context
