@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch
 from .query import QueryEngine
 
 
@@ -311,6 +311,54 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="batch",
+            description=(
+                "Execute multiple write operations as a batch. "
+                "Operations run sequentially and stop on first failure. "
+                "Each operation needs: action (insert/update/delete), table_name, "
+                "and action-specific fields (rows for insert, filter+updates for update, "
+                "filter for delete). Note: cross-table atomicity is best-effort."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["insert", "update", "delete"],
+                                    "description": "The write operation to perform",
+                                },
+                                "table_name": {
+                                    "type": "string",
+                                    "description": "Target table name",
+                                },
+                                "rows": {
+                                    "type": "array",
+                                    "items": {"type": "object"},
+                                    "description": "Rows to insert (for insert action)",
+                                },
+                                "filter": {
+                                    "type": "string",
+                                    "description": "SQL WHERE clause (for update/delete actions)",
+                                },
+                                "updates": {
+                                    "type": "object",
+                                    "description": "Column updates (for update action)",
+                                },
+                            },
+                            "required": ["action", "table_name"],
+                        },
+                        "description": "Array of operations to execute",
+                    },
+                },
+                "required": ["operations"],
             },
         ),
     ]
@@ -776,6 +824,52 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Expire failed: {str(e)}",
+                )]
+
+        elif name == "batch":
+            operations = arguments.get("operations")
+
+            if not operations or not isinstance(operations, list):
+                return [TextContent(
+                    type="text",
+                    text="Error: 'operations' parameter is required and must be a non-empty array",
+                )]
+
+            try:
+                catalog = get_catalog()
+                results = execute_batch(catalog, operations)
+
+                engine = get_engine()
+                engine.refresh()
+
+                # Format results
+                ok_count = sum(1 for r in results if r["status"] == "ok")
+                err_count = sum(1 for r in results if r["status"] == "error")
+                skip_count = sum(1 for r in results if r["status"] == "skipped")
+
+                lines = [f"**Batch complete: {ok_count} succeeded, {err_count} failed, {skip_count} skipped**\n"]
+                for r in results:
+                    if r["status"] == "ok":
+                        lines.append(f"- ✓ [{r['index']}] {r['action']} on `{r['table']}`: {r['rows_affected']} rows")
+                    elif r["status"] == "error":
+                        lines.append(f"- ✗ [{r['index']}] {r.get('action', '?')}: {r['message']}")
+                    else:
+                        lines.append(f"- ⊘ [{r['index']}] {r['message']}")
+
+                return [TextContent(
+                    type="text",
+                    text="\n".join(lines),
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Batch error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Batch failed: {str(e)}",
                 )]
 
         else:

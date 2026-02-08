@@ -690,6 +690,94 @@ def expire_snapshots(
     }
 
 
+def execute_batch(
+    catalog: Catalog,
+    operations: list[dict],
+) -> list[dict]:
+    """Execute multiple write operations as a batch.
+
+    Operations run sequentially. If any operation fails, previously completed
+    operations are NOT rolled back (Iceberg doesn't support cross-table
+    transactions). The result includes status for each operation.
+
+    Args:
+        catalog: The Iceberg catalog
+        operations: List of operation dicts, each with:
+            - action: 'insert', 'update', or 'delete'
+            - table_name: target table
+            - For insert: 'rows' (list of dicts)
+            - For update: 'filter' (str) and 'updates' (dict)
+            - For delete: 'filter' (str)
+
+    Returns:
+        List of result dicts with status for each operation
+    """
+    if not operations:
+        raise ValueError("Operations list must not be empty")
+
+    results = []
+    for i, op in enumerate(operations):
+        action = op.get("action")
+        table_name = op.get("table_name")
+
+        if not action:
+            results.append({"index": i, "status": "error", "message": "Missing 'action'"})
+            continue
+        if not table_name:
+            results.append({"index": i, "status": "error", "message": "Missing 'table_name'"})
+            continue
+
+        try:
+            if action == "insert":
+                rows = op.get("rows")
+                if not rows:
+                    results.append({"index": i, "status": "error", "message": "Missing 'rows' for insert"})
+                    continue
+                count = insert_rows(catalog, table_name, rows)
+                results.append({
+                    "index": i, "status": "ok", "action": "insert",
+                    "table": table_name, "rows_affected": count,
+                })
+
+            elif action == "update":
+                filter_expr = op.get("filter")
+                updates = op.get("updates")
+                if not filter_expr or not updates:
+                    results.append({"index": i, "status": "error", "message": "Missing 'filter' or 'updates' for update"})
+                    continue
+                count = update_rows(catalog, table_name, filter_expr, updates)
+                results.append({
+                    "index": i, "status": "ok", "action": "update",
+                    "table": table_name, "rows_affected": count,
+                })
+
+            elif action == "delete":
+                filter_expr = op.get("filter")
+                if not filter_expr:
+                    results.append({"index": i, "status": "error", "message": "Missing 'filter' for delete"})
+                    continue
+                count = delete_rows(catalog, table_name, filter_expr)
+                results.append({
+                    "index": i, "status": "ok", "action": "delete",
+                    "table": table_name, "rows_affected": count,
+                })
+
+            else:
+                results.append({"index": i, "status": "error", "message": f"Unknown action '{action}'"})
+
+        except Exception as e:
+            results.append({
+                "index": i, "status": "error", "action": action,
+                "table": table_name, "message": str(e),
+            })
+            # Stop on first failure for safety
+            for j in range(i + 1, len(operations)):
+                results.append({"index": j, "status": "skipped", "message": "Skipped due to earlier failure"})
+            break
+
+    return results
+
+
 TYPE_MAP = {
     "string": StringType,
     "long": LongType,
