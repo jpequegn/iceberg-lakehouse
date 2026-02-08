@@ -528,6 +528,168 @@ def delete_rows(
     return match_count
 
 
+def rollback_table(
+    catalog: Catalog,
+    table_name: str,
+    snapshot_id: int | None = None,
+    timestamp: str | None = None,
+) -> dict:
+    """Rollback a table to a previous snapshot.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        snapshot_id: Snapshot ID to rollback to
+        timestamp: ISO timestamp to rollback to (finds nearest snapshot at or before)
+
+    Returns:
+        Dict with rollback details
+
+    Raises:
+        ValueError: If neither snapshot_id nor timestamp provided, or snapshot not found
+    """
+    import datetime
+
+    if not snapshot_id and not timestamp:
+        raise ValueError("Either snapshot_id or timestamp must be provided")
+
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    current = table.current_snapshot()
+    if current is None:
+        raise ValueError(f"Table '{table_name}' has no snapshots")
+
+    # Resolve target snapshot
+    if snapshot_id:
+        target = table.snapshot_by_id(snapshot_id)
+        if target is None:
+            raise ValueError(f"Snapshot ID {snapshot_id} not found in table '{table_name}'")
+    else:
+        ts = datetime.datetime.fromisoformat(timestamp)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        timestamp_ms = int(ts.timestamp() * 1000)
+        target = table.snapshot_as_of_timestamp(timestamp_ms)
+        if target is None:
+            raise ValueError(f"No snapshot found at or before {timestamp} in table '{table_name}'")
+
+    if target.snapshot_id == current.snapshot_id:
+        return {
+            "snapshot_id": target.snapshot_id,
+            "message": "Already at this snapshot, no rollback needed",
+        }
+
+    # Read data from the target snapshot and overwrite
+    arrow_data = table.scan(snapshot_id=target.snapshot_id).to_arrow()
+    table.overwrite(arrow_data)
+
+    target_ts = datetime.datetime.fromtimestamp(
+        target.timestamp_ms / 1000, tz=datetime.timezone.utc
+    ).isoformat()
+
+    return {
+        "snapshot_id": target.snapshot_id,
+        "timestamp": target_ts,
+        "message": f"Rolled back to snapshot {target.snapshot_id} ({target_ts})",
+    }
+
+
+def expire_snapshots(
+    catalog: Catalog,
+    table_name: str,
+    older_than: str | None = None,
+    retain_last: int | None = None,
+) -> dict:
+    """Expire old snapshots from a table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        older_than: ISO timestamp or duration string (e.g., '30d') — expire snapshots older than this
+        retain_last: Minimum number of recent snapshots to keep
+
+    Returns:
+        Dict with expiration details
+    """
+    import datetime
+    import re
+
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    before_count = len(list(table.snapshots()))
+
+    if not older_than and not retain_last:
+        raise ValueError("Either older_than or retain_last must be provided")
+
+    # If retain_last is set, compute the cutoff from snapshot timestamps
+    # PyIceberg's ExpireSnapshots supports .older_than(datetime)
+    expire_op = table.maintenance.expire_snapshots()
+
+    if older_than:
+        # Try duration format (e.g., '30d', '7d', '24h')
+        duration_match = re.match(r'^(\d+)([dhm])$', older_than.strip())
+        if duration_match:
+            amount = int(duration_match.group(1))
+            unit = duration_match.group(2)
+            if unit == 'd':
+                cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=amount)
+            elif unit == 'h':
+                cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=amount)
+            elif unit == 'm':
+                cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=amount)
+            else:
+                raise ValueError(f"Unsupported duration unit: {unit}")
+        else:
+            # Try ISO timestamp
+            cutoff = datetime.datetime.fromisoformat(older_than)
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=datetime.timezone.utc)
+
+        expire_op = expire_op.older_than(cutoff)
+
+    if retain_last:
+        # Manually determine which snapshots to keep
+        # Get all snapshots sorted by timestamp descending
+        all_snapshots = sorted(table.snapshots(), key=lambda s: s.timestamp_ms, reverse=True)
+        keep_ids = {s.snapshot_id for s in all_snapshots[:retain_last]}
+
+        # Expire specific IDs that are both older than cutoff and not in keep set
+        for snapshot in all_snapshots:
+            if snapshot.snapshot_id not in keep_ids:
+                expire_op = expire_op.by_id(snapshot.snapshot_id)
+
+        # If we only have retain_last without older_than, just commit what we have
+        if not older_than:
+            expire_op.commit()
+            after_count = len(list(catalog.load_table(table_name).snapshots()))
+            return {
+                "expired": before_count - after_count,
+                "remaining": after_count,
+                "message": f"Expired {before_count - after_count} snapshot(s), retained last {retain_last}",
+            }
+
+    expire_op.commit()
+
+    after_count = len(list(catalog.load_table(table_name).snapshots()))
+    return {
+        "expired": before_count - after_count,
+        "remaining": after_count,
+        "message": f"Expired {before_count - after_count} snapshot(s), {after_count} remaining",
+    }
+
+
 TYPE_MAP = {
     "string": StringType,
     "long": LongType,

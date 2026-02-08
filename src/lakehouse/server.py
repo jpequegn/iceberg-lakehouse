@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots
 from .query import QueryEngine
 
 
@@ -258,6 +258,59 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name", "operation", "column_name"],
+            },
+        ),
+        Tool(
+            name="rollback",
+            description=(
+                "Rollback a table to a previous snapshot. "
+                "Provide either a snapshot_id or a timestamp (ISO format). "
+                "Use list_snapshots to find available snapshot IDs. "
+                "This restores the table data to the state at that snapshot."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                    "snapshot_id": {
+                        "type": "integer",
+                        "description": "Snapshot ID to rollback to",
+                    },
+                    "timestamp": {
+                        "type": "string",
+                        "description": "ISO timestamp to rollback to (e.g., '2025-12-01T00:00:00')",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="expire_snapshots",
+            description=(
+                "Expire old snapshots to clean up storage. "
+                "Provide older_than (ISO timestamp or duration like '30d', '24h') "
+                "and/or retain_last (minimum snapshots to keep)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                    "older_than": {
+                        "type": "string",
+                        "description": "Expire snapshots older than this (ISO timestamp or duration like '30d')",
+                    },
+                    "retain_last": {
+                        "type": "integer",
+                        "description": "Minimum number of recent snapshots to keep",
+                    },
+                },
+                "required": ["table_name"],
             },
         ),
     ]
@@ -643,6 +696,86 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Alter table failed: {str(e)}",
+                )]
+
+        elif name == "rollback":
+            table_name = arguments.get("table_name")
+            snapshot_id = arguments.get("snapshot_id")
+            timestamp = arguments.get("timestamp")
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            if not snapshot_id and not timestamp:
+                return [TextContent(
+                    type="text",
+                    text="Error: either 'snapshot_id' or 'timestamp' must be provided",
+                )]
+
+            try:
+                catalog = get_catalog()
+                result = rollback_table(catalog, table_name, snapshot_id=snapshot_id, timestamp=timestamp)
+
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Rollback error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Rollback failed: {str(e)}",
+                )]
+
+        elif name == "expire_snapshots":
+            table_name = arguments.get("table_name")
+            older_than = arguments.get("older_than")
+            retain_last = arguments.get("retain_last")
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            if not older_than and not retain_last:
+                return [TextContent(
+                    type="text",
+                    text="Error: either 'older_than' or 'retain_last' must be provided",
+                )]
+
+            try:
+                catalog = get_catalog()
+                result = expire_snapshots(catalog, table_name, older_than=older_than, retain_last=retain_last)
+
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Expire error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Expire failed: {str(e)}",
                 )]
 
         else:
