@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows
 from .query import QueryEngine
 
 
@@ -162,6 +162,37 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name", "filter"],
+            },
+        ),
+        Tool(
+            name="upsert",
+            description=(
+                "Upsert (insert or update) rows in an Iceberg table. "
+                "Matches rows on key columns - updates existing rows if keys match, "
+                "inserts new rows if no match found. Useful for data synchronization "
+                "and idempotent data loading. "
+                "Example: upsert into expenses with key_columns=['id'], "
+                "rows=[{'id': 1, 'amount': 90.0}]"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                    "key_columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Columns to match on for determining insert vs update (e.g., ['id'])",
+                    },
+                    "rows": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Array of row objects to upsert",
+                    },
+                },
+                "required": ["table_name", "key_columns", "rows"],
             },
         ),
     ]
@@ -395,6 +426,56 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Delete failed: {str(e)}",
+                )]
+
+        elif name == "upsert":
+            table_name = arguments.get("table_name")
+            key_columns = arguments.get("key_columns")
+            rows = arguments.get("rows")
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            if not key_columns or not isinstance(key_columns, list):
+                return [TextContent(
+                    type="text",
+                    text="Error: 'key_columns' parameter is required and must be an array of column names",
+                )]
+
+            if not rows or not isinstance(rows, list):
+                return [TextContent(
+                    type="text",
+                    text="Error: 'rows' parameter is required and must be a non-empty array",
+                )]
+
+            try:
+                catalog = get_catalog()
+                result = upsert_rows(catalog, table_name, key_columns, rows)
+
+                # Refresh the query engine to pick up changes
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"✓ Upsert into `{table_name}` complete: "
+                        f"{result['inserted']} inserted, {result['updated']} updated."
+                    ),
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Upsert error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Upsert failed: {str(e)}",
                 )]
 
         else:

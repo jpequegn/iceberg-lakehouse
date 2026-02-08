@@ -441,6 +441,161 @@ def delete_rows(
     return match_count
 
 
+def upsert_rows(
+    catalog: Catalog,
+    table_name: str,
+    key_columns: list[str],
+    rows: list[dict],
+) -> dict[str, int]:
+    """Upsert rows into an Iceberg table (insert or update on key match).
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        key_columns: Columns to match on for determining insert vs update
+        rows: List of dictionaries, each representing a row
+
+    Returns:
+        Dict with 'inserted' and 'updated' counts
+
+    Raises:
+        ValueError: If table doesn't exist, key columns are invalid, or rows are empty
+    """
+    import datetime
+    import duckdb
+
+    if not rows:
+        return {"inserted": 0, "updated": 0}
+
+    if not key_columns:
+        raise ValueError("key_columns must not be empty")
+
+    # Normalize table name
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    # Load table
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    schema = table.schema()
+    field_names = {field.name for field in schema.fields}
+
+    # Validate key columns exist
+    for col in key_columns:
+        if col not in field_names:
+            raise ValueError(f"Key column '{col}' does not exist in table '{table_name}'")
+
+    # Build Arrow table from incoming rows using the same logic as insert_rows
+    columns: dict[str, list] = {field.name: [] for field in schema.fields}
+    for row in rows:
+        for field in schema.fields:
+            columns[field.name].append(row.get(field.name))
+
+    arrow_arrays = {}
+    for field in schema.fields:
+        values = columns[field.name]
+        field_type = str(field.field_type)
+        try:
+            if field_type == "long":
+                converted = [int(v) if v is not None else None for v in values]
+                arrow_arrays[field.name] = pa.array(converted, type=pa.int64())
+            elif field_type == "double":
+                converted = [float(v) if v is not None else None for v in values]
+                arrow_arrays[field.name] = pa.array(converted, type=pa.float64())
+            elif field_type == "string":
+                converted = [str(v) if v is not None else None for v in values]
+                arrow_arrays[field.name] = pa.array(converted, type=pa.string())
+            elif field_type == "date":
+                converted = []
+                for v in values:
+                    if v is None:
+                        converted.append(None)
+                    elif isinstance(v, datetime.date):
+                        converted.append(v)
+                    elif isinstance(v, str):
+                        converted.append(datetime.date.fromisoformat(v))
+                    else:
+                        converted.append(None)
+                arrow_arrays[field.name] = pa.array(converted, type=pa.date32())
+            elif field_type.startswith("timestamp"):
+                converted = []
+                for v in values:
+                    if v is None:
+                        converted.append(None)
+                    elif isinstance(v, datetime.datetime):
+                        converted.append(v)
+                    elif isinstance(v, str):
+                        converted.append(datetime.datetime.fromisoformat(v))
+                    else:
+                        converted.append(None)
+                arrow_arrays[field.name] = pa.array(converted, type=pa.timestamp("us"))
+            else:
+                arrow_arrays[field.name] = pa.array(values)
+        except Exception as e:
+            raise ValueError(f"Error converting column '{field.name}': {e}")
+
+    new_arrow = pa.table(arrow_arrays)
+
+    # Read existing data
+    try:
+        existing_arrow = table.scan().to_arrow()
+    except Exception:
+        existing_arrow = None
+
+    if existing_arrow is None or existing_arrow.num_rows == 0:
+        # No existing data - just insert everything
+        table.append(new_arrow)
+        return {"inserted": len(rows), "updated": 0}
+
+    # Use DuckDB to merge
+    conn = duckdb.connect(":memory:")
+    conn.register("existing", existing_arrow)
+    conn.register("incoming", new_arrow)
+
+    # Build join condition
+    join_cond = " AND ".join(
+        f'existing."{col}" = incoming."{col}"' for col in key_columns
+    )
+
+    # Count how many incoming rows match existing rows
+    count_sql = f'SELECT COUNT(*) FROM incoming JOIN existing ON {join_cond}'
+    updated_count = conn.execute(count_sql).fetchone()[0]
+    inserted_count = len(rows) - updated_count
+
+    # Build merged result:
+    # 1. For matched rows: take incoming values (update)
+    # 2. For unmatched existing rows: keep as-is
+    # 3. For unmatched incoming rows: insert
+    col_names = [f'"{field.name}"' for field in schema.fields]
+    col_list = ", ".join(col_names)
+
+    # Unmatched existing rows (not in incoming)
+    incoming_key_null_checks = " AND ".join(
+        f'incoming."{col}" IS NULL' for col in key_columns
+    )
+    unmatched_existing_sql = (
+        f"SELECT {', '.join(f'existing.{c}' for c in col_names)} "
+        f"FROM existing LEFT JOIN incoming ON {join_cond} "
+        f"WHERE {incoming_key_null_checks}"
+    )
+
+    # All incoming rows (they either update or insert)
+    incoming_cols_sql = ", ".join(f'incoming.{c}' for c in col_names)
+
+    merged_sql = f"{unmatched_existing_sql} UNION ALL SELECT {incoming_cols_sql} FROM incoming"
+
+    merged_arrow = conn.execute(merged_sql).fetch_arrow_table()
+    conn.close()
+
+    # Overwrite the table with merged data
+    table.overwrite(merged_arrow)
+
+    return {"inserted": inserted_count, "updated": updated_count}
+
+
 def insert_sample_data(catalog: Catalog) -> None:
     """Insert sample data into tables."""
     import datetime
