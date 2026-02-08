@@ -633,12 +633,14 @@ def expire_snapshots(
     if not older_than and not retain_last:
         raise ValueError("Either older_than or retain_last must be provided")
 
-    # If retain_last is set, compute the cutoff from snapshot timestamps
-    # PyIceberg's ExpireSnapshots supports .older_than(datetime)
-    expire_op = table.maintenance.expire_snapshots()
+    all_snapshots = sorted(table.snapshots(), key=lambda s: s.timestamp_ms, reverse=True)
+    current = table.current_snapshot()
+
+    # Determine which snapshot IDs to expire
+    ids_to_expire = set()
 
     if older_than:
-        # Try duration format (e.g., '30d', '7d', '24h')
+        # Parse cutoff timestamp
         duration_match = re.match(r'^(\d+)([dhm])$', older_than.strip())
         if duration_match:
             amount = int(duration_match.group(1))
@@ -652,42 +654,40 @@ def expire_snapshots(
             else:
                 raise ValueError(f"Unsupported duration unit: {unit}")
         else:
-            # Try ISO timestamp
             cutoff = datetime.datetime.fromisoformat(older_than)
             if cutoff.tzinfo is None:
                 cutoff = cutoff.replace(tzinfo=datetime.timezone.utc)
 
-        expire_op = expire_op.older_than(cutoff)
+        cutoff_ms = int(cutoff.timestamp() * 1000)
+        ids_to_expire = {s.snapshot_id for s in all_snapshots if s.timestamp_ms < cutoff_ms}
 
     if retain_last:
-        # Manually determine which snapshots to keep
-        # Get all snapshots sorted by timestamp descending
-        all_snapshots = sorted(table.snapshots(), key=lambda s: s.timestamp_ms, reverse=True)
         keep_ids = {s.snapshot_id for s in all_snapshots[:retain_last]}
+        if current:
+            keep_ids.add(current.snapshot_id)
+        retain_expire = {s.snapshot_id for s in all_snapshots if s.snapshot_id not in keep_ids}
+        ids_to_expire = ids_to_expire | retain_expire if older_than else retain_expire
 
-        # Expire specific IDs that are both older than cutoff and not in keep set
-        for snapshot in all_snapshots:
-            if snapshot.snapshot_id not in keep_ids:
-                expire_op = expire_op.by_id(snapshot.snapshot_id)
+    # Never expire the current snapshot
+    if current:
+        ids_to_expire.discard(current.snapshot_id)
 
-        # If we only have retain_last without older_than, just commit what we have
-        if not older_than:
-            expire_op.commit()
-            after_count = len(list(catalog.load_table(table_name).snapshots()))
-            return {
-                "expired": before_count - after_count,
-                "remaining": after_count,
-                "message": f"Expired {before_count - after_count} snapshot(s), retained last {retain_last}",
-            }
+    if not ids_to_expire:
+        msg = f"No snapshots to expire (retaining last {retain_last})" if retain_last else "No snapshots to expire"
+        return {"expired": 0, "remaining": before_count, "message": msg}
 
+    expire_op = table.maintenance.expire_snapshots()
+    for sid in ids_to_expire:
+        expire_op = expire_op.by_id(sid)
     expire_op.commit()
 
     after_count = len(list(catalog.load_table(table_name).snapshots()))
-    return {
-        "expired": before_count - after_count,
-        "remaining": after_count,
-        "message": f"Expired {before_count - after_count} snapshot(s), {after_count} remaining",
-    }
+    expired = before_count - after_count
+    if retain_last:
+        msg = f"Expired {expired} snapshot(s), retained last {retain_last}"
+    else:
+        msg = f"Expired {expired} snapshot(s), {after_count} remaining"
+    return {"expired": expired, "remaining": after_count, "message": msg}
 
 
 def execute_batch(
