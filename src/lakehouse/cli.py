@@ -201,6 +201,50 @@ def ingest(file_path: str, table_name: str, file_format: str):
 
 @main.command()
 @click.argument("table_name")
+@click.argument("key_columns")
+@click.argument("json_data")
+def upsert(table_name: str, key_columns: str, json_data: str):
+    """Upsert rows into a table (insert or update on key match).
+
+    TABLE_NAME is the target table (e.g., 'expenses').
+    KEY_COLUMNS is a comma-separated list of key columns (e.g., 'id' or 'id,date').
+    JSON_DATA is a JSON array of row objects.
+    """
+    import json
+    from .catalog import get_catalog, upsert_rows
+
+    # Parse key columns
+    keys = [k.strip() for k in key_columns.split(",") if k.strip()]
+    if not keys:
+        console.print("[bold red]Error:[/bold red] key_columns must not be empty")
+        raise click.Abort()
+
+    # Parse JSON data
+    try:
+        rows = json.loads(json_data)
+    except json.JSONDecodeError as e:
+        console.print(f"[bold red]Error:[/bold red] Invalid JSON: {e}")
+        raise click.Abort()
+
+    if not isinstance(rows, list) or not rows:
+        console.print("[bold red]Error:[/bold red] JSON_DATA must be a non-empty array of objects")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        result = upsert_rows(catalog, table_name, keys, rows)
+        console.print(
+            f"[bold green]✓ Upsert into {table_name}: "
+            f"{result['inserted']} inserted, {result['updated']} updated.[/bold green]"
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
+@click.argument("table_name")
 @click.argument("filter_expr")
 @click.option("--force", is_flag=True, help="Skip confirmation prompt")
 def delete(table_name: str, filter_expr: str, force: bool):
