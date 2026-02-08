@@ -54,12 +54,22 @@ def init(with_sample_data: bool):
 @click.argument("sql")
 @click.option("--max-rows", default=100, help="Maximum rows to return")
 @click.option("--format", "output_format", type=click.Choice(["table", "csv", "json"]), default="table")
-def query(sql: str, max_rows: int, output_format: str):
+@click.option("--as-of", default=None, help="Time travel: ISO timestamp or snapshot ID")
+@click.option("--table-name", default=None, help="Table name for time travel queries (required with --as-of)")
+def query(sql: str, max_rows: int, output_format: str, as_of: str, table_name: str):
     """Execute a SQL query against the lakehouse."""
-    from .query import execute_query
+    from .query import QueryEngine
+
+    engine = QueryEngine()
 
     try:
-        result = execute_query(sql, max_rows=max_rows)
+        if as_of:
+            if not table_name:
+                console.print("[bold red]Error:[/bold red] --table-name is required with --as-of")
+                raise click.Abort()
+            result = engine.execute_as_of(sql, table_name, as_of, max_rows=max_rows)
+        else:
+            result = engine.execute(sql, max_rows=max_rows)
 
         if result.empty:
             console.print("[yellow]Query returned no results.[/yellow]")
@@ -79,7 +89,47 @@ def query(sql: str, max_rows: int, output_format: str):
         elif output_format == "json":
             print(result.to_json(orient="records", indent=2))
 
-        console.print(f"\n[dim]({len(result)} rows)[/dim]")
+        label = f"({len(result)} rows)"
+        if as_of:
+            label = f"({len(result)} rows, as of {as_of})"
+        console.print(f"\n[dim]{label}[/dim]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
+@click.argument("table_name")
+def snapshots(table_name: str):
+    """List all snapshots for a table (for time travel queries)."""
+    from .catalog import get_catalog, get_snapshots
+
+    catalog = get_catalog()
+
+    try:
+        snaps = get_snapshots(catalog, table_name)
+
+        if not snaps:
+            console.print(f"[yellow]No snapshots found for {table_name}.[/yellow]")
+            return
+
+        console.print(f"[bold]Snapshots for {table_name} ({len(snaps)}):[/bold]\n")
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Snapshot ID")
+        table.add_column("Timestamp")
+        table.add_column("Operation")
+        table.add_column("Parent ID")
+
+        for s in snaps:
+            table.add_row(
+                str(s["snapshot_id"]),
+                s["timestamp"],
+                s["operation"] or "",
+                str(s["parent_id"]) if s["parent_id"] else "",
+            )
+
+        console.print(table)
 
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")

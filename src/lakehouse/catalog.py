@@ -65,6 +65,93 @@ def list_tables(catalog: Catalog, namespace: str = "default") -> list[str]:
     return [f"{ns}.{name}" for ns, name in tables]
 
 
+def get_snapshots(catalog: Catalog, table_name: str) -> list[dict]:
+    """List all snapshots for a table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+
+    Returns:
+        List of snapshot dicts with id, timestamp, summary
+    """
+    import datetime
+
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    snapshots = []
+    for snapshot in table.snapshots():
+        ts = datetime.datetime.fromtimestamp(
+            snapshot.timestamp_ms / 1000, tz=datetime.timezone.utc
+        )
+        snapshots.append({
+            "snapshot_id": snapshot.snapshot_id,
+            "timestamp": ts.isoformat(),
+            "parent_id": snapshot.parent_snapshot_id,
+            "operation": snapshot.summary.operation.value if snapshot.summary else None,
+            "summary": {k: v for k, v in (snapshot.summary.additional_properties.items() if snapshot.summary else [])},
+        })
+
+    return snapshots
+
+
+def scan_as_of(
+    catalog: Catalog,
+    table_name: str,
+    as_of: str,
+) -> "pa.Table":
+    """Scan a table at a specific point in time or snapshot.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        as_of: Either an ISO timestamp string or a snapshot ID (integer string)
+
+    Returns:
+        PyArrow table with data at that point in time
+    """
+    import datetime
+
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    # Try to parse as snapshot ID first (pure integer)
+    try:
+        snapshot_id = int(as_of)
+        snapshot = table.snapshot_by_id(snapshot_id)
+        if snapshot is None:
+            raise ValueError(f"Snapshot ID {snapshot_id} not found in table '{table_name}'")
+        return table.scan(snapshot_id=snapshot_id).to_arrow()
+    except ValueError as ve:
+        if "not found" in str(ve):
+            raise
+        pass
+
+    # Parse as ISO timestamp
+    try:
+        ts = datetime.datetime.fromisoformat(as_of)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        timestamp_ms = int(ts.timestamp() * 1000)
+        snapshot = table.snapshot_as_of_timestamp(timestamp_ms)
+        if snapshot is None:
+            raise ValueError(f"No snapshot found at or before {as_of} in table '{table_name}'")
+        return table.scan(snapshot_id=snapshot.snapshot_id).to_arrow()
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid as_of value '{as_of}': must be ISO timestamp or snapshot ID. {e}")
+
+
 def get_table_schema(catalog: Catalog, table_name: str) -> dict:
     """Get schema information for a table."""
     if "." not in table_name:

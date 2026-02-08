@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots
 from .query import QueryEngine
 
 
@@ -42,7 +42,9 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Execute a SQL query against the lakehouse. "
                 "Available tables: expenses, health, notes. "
-                "Use standard SQL syntax. Results limited to 1000 rows by default."
+                "Use standard SQL syntax. Results limited to 1000 rows by default. "
+                "Supports time travel: provide as_of with an ISO timestamp or snapshot ID "
+                "and table_name to query historical data."
             ),
             inputSchema={
                 "type": "object",
@@ -56,8 +58,34 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum rows to return (default: 1000)",
                         "default": 1000,
                     },
+                    "as_of": {
+                        "type": "string",
+                        "description": "ISO timestamp or snapshot ID for time travel queries (e.g., '2025-12-01T00:00:00')",
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table name for time travel queries (required when as_of is set)",
+                    },
                 },
                 "required": ["sql"],
+            },
+        ),
+        Tool(
+            name="list_snapshots",
+            description=(
+                "List all available snapshots for a table, showing snapshot IDs, "
+                "timestamps, and operations. Use snapshot IDs with the query tool's "
+                "as_of parameter for time travel queries."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                },
+                "required": ["table_name"],
             },
         ),
         Tool(
@@ -248,10 +276,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 )]
 
             max_rows = arguments.get("max_rows", 1000)
+            as_of = arguments.get("as_of")
+            table_name = arguments.get("table_name")
             engine = get_engine()
 
             try:
-                result = engine.execute(sql, max_rows=max_rows)
+                if as_of:
+                    if not table_name:
+                        return [TextContent(
+                            type="text",
+                            text="Error: 'table_name' is required when using 'as_of' for time travel queries",
+                        )]
+                    result = engine.execute_as_of(sql, table_name, as_of, max_rows=max_rows)
+                else:
+                    result = engine.execute(sql, max_rows=max_rows)
 
                 # Format as markdown table for readability
                 if result.empty:
@@ -261,15 +299,55 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 markdown = result.to_markdown(index=False)
                 row_count = len(result)
 
+                header = f"**Results ({row_count} rows)"
+                if as_of:
+                    header += f" as of {as_of}"
+                header += ":**"
+
                 return [TextContent(
                     type="text",
-                    text=f"**Results ({row_count} rows):**\n\n{markdown}",
+                    text=f"{header}\n\n{markdown}",
                 )]
 
             except Exception as e:
                 return [TextContent(
                     type="text",
                     text=f"Query error: {str(e)}",
+                )]
+
+        elif name == "list_snapshots":
+            table_name = arguments.get("table_name")
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            try:
+                catalog = get_catalog()
+                snapshots = get_snapshots(catalog, table_name)
+
+                if not snapshots:
+                    return [TextContent(
+                        type="text",
+                        text=f"No snapshots found for `{table_name}`.",
+                    )]
+
+                lines = [f"**Snapshots for `{table_name}` ({len(snapshots)}):**\n"]
+                for s in snapshots:
+                    lines.append(
+                        f"- **{s['snapshot_id']}** | {s['timestamp']} | {s['operation'] or 'unknown'}"
+                    )
+
+                return [TextContent(
+                    type="text",
+                    text="\n".join(lines),
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Error: {str(e)}",
                 )]
 
         elif name == "list_tables":
