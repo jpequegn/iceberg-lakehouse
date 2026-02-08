@@ -441,6 +441,90 @@ def delete_rows(
     return match_count
 
 
+TYPE_MAP = {
+    "string": StringType,
+    "long": LongType,
+    "int": LongType,
+    "integer": LongType,
+    "double": DoubleType,
+    "float": DoubleType,
+    "timestamp": TimestampType,
+    "date": DateType,
+}
+
+
+def alter_table(
+    catalog: Catalog,
+    table_name: str,
+    operation: str,
+    column_name: str,
+    new_name: str | None = None,
+    column_type: str | None = None,
+) -> str:
+    """Alter a table's schema.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        operation: One of 'add_column', 'drop_column', 'rename_column'
+        column_name: Target column name
+        new_name: New column name (for rename_column)
+        column_type: Column type string (for add_column)
+
+    Returns:
+        Description of the change made
+
+    Raises:
+        ValueError: If parameters are invalid
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    if operation == "add_column":
+        if not column_type:
+            raise ValueError("column_type is required for add_column")
+
+        type_key = column_type.lower().strip()
+        if type_key not in TYPE_MAP:
+            raise ValueError(
+                f"Unsupported column type '{column_type}'. "
+                f"Supported types: {', '.join(sorted(TYPE_MAP.keys()))}"
+            )
+
+        iceberg_type = TYPE_MAP[type_key]()
+
+        with table.update_schema() as update:
+            update.add_column(column_name, iceberg_type)
+
+        return f"Added column '{column_name}' ({column_type}) to {table_name}"
+
+    elif operation == "drop_column":
+        with table.update_schema() as update:
+            update.delete_column(column_name)
+
+        return f"Dropped column '{column_name}' from {table_name}"
+
+    elif operation == "rename_column":
+        if not new_name:
+            raise ValueError("new_name is required for rename_column")
+
+        with table.update_schema() as update:
+            update.rename_column(column_name, new_name)
+
+        return f"Renamed column '{column_name}' to '{new_name}' in {table_name}"
+
+    else:
+        raise ValueError(
+            f"Unknown operation '{operation}'. "
+            f"Supported: add_column, drop_column, rename_column"
+        )
+
+
 def upsert_rows(
     catalog: Catalog,
     table_name: str,

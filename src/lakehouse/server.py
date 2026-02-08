@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table
 from .query import QueryEngine
 
 
@@ -193,6 +193,43 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name", "key_columns", "rows"],
+            },
+        ),
+        Tool(
+            name="alter_table",
+            description=(
+                "Alter a table's schema: add, drop, or rename columns. "
+                "Iceberg schema evolution is safe - no data rewrite required. "
+                "Supported operations: add_column, drop_column, rename_column. "
+                "For add_column, provide column_type (string, long, double, date, timestamp). "
+                "For rename_column, provide new_name."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["add_column", "drop_column", "rename_column"],
+                        "description": "Schema operation to perform",
+                    },
+                    "column_name": {
+                        "type": "string",
+                        "description": "Target column name",
+                    },
+                    "new_name": {
+                        "type": "string",
+                        "description": "New column name (required for rename_column)",
+                    },
+                    "column_type": {
+                        "type": "string",
+                        "description": "Column type for add_column (string, long, double, date, timestamp)",
+                    },
+                },
+                "required": ["table_name", "operation", "column_name"],
             },
         ),
     ]
@@ -476,6 +513,58 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Upsert failed: {str(e)}",
+                )]
+
+        elif name == "alter_table":
+            table_name = arguments.get("table_name")
+            operation = arguments.get("operation")
+            column_name = arguments.get("column_name")
+            new_name = arguments.get("new_name")
+            column_type = arguments.get("column_type")
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            if not operation:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'operation' parameter is required (add_column, drop_column, rename_column)",
+                )]
+
+            if not column_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'column_name' parameter is required",
+                )]
+
+            try:
+                catalog = get_catalog()
+                result_msg = alter_table(
+                    catalog, table_name, operation, column_name,
+                    new_name=new_name, column_type=column_type,
+                )
+
+                # Refresh the query engine to pick up schema changes
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result_msg}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Alter table error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Alter table failed: {str(e)}",
                 )]
 
         else:

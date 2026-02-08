@@ -199,6 +199,85 @@ def ingest(file_path: str, table_name: str, file_format: str):
         raise click.Abort()
 
 
+@main.group()
+@click.argument("table_name")
+@click.pass_context
+def alter(ctx, table_name: str):
+    """Alter a table's schema (add/drop/rename columns).
+
+    TABLE_NAME is the target table (e.g., 'expenses').
+    """
+    ctx.ensure_object(dict)
+    ctx.obj["table_name"] = table_name
+
+
+@alter.command("add-column")
+@click.argument("column_name")
+@click.argument("column_type")
+@click.pass_context
+def alter_add_column(ctx, column_name: str, column_type: str):
+    """Add a column to the table.
+
+    COLUMN_NAME is the new column name.
+    COLUMN_TYPE is the data type (string, long, double, date, timestamp).
+    """
+    from .catalog import get_catalog, alter_table
+
+    table_name = ctx.obj["table_name"]
+    catalog = get_catalog()
+
+    try:
+        msg = alter_table(catalog, table_name, "add_column", column_name, column_type=column_type)
+        console.print(f"[bold green]✓ {msg}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@alter.command("drop-column")
+@click.argument("column_name")
+@click.pass_context
+def alter_drop_column(ctx, column_name: str):
+    """Drop a column from the table.
+
+    COLUMN_NAME is the column to remove.
+    """
+    from .catalog import get_catalog, alter_table
+
+    table_name = ctx.obj["table_name"]
+    catalog = get_catalog()
+
+    try:
+        msg = alter_table(catalog, table_name, "drop_column", column_name)
+        console.print(f"[bold green]✓ {msg}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@alter.command("rename-column")
+@click.argument("column_name")
+@click.argument("new_name")
+@click.pass_context
+def alter_rename_column(ctx, column_name: str, new_name: str):
+    """Rename a column in the table.
+
+    COLUMN_NAME is the current column name.
+    NEW_NAME is the new column name.
+    """
+    from .catalog import get_catalog, alter_table
+
+    table_name = ctx.obj["table_name"]
+    catalog = get_catalog()
+
+    try:
+        msg = alter_table(catalog, table_name, "rename_column", column_name, new_name=new_name)
+        console.print(f"[bold green]✓ {msg}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command()
 @click.argument("table_name")
 @click.argument("key_columns")
