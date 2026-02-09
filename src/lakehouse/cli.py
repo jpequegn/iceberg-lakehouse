@@ -776,6 +776,52 @@ def alter_remove_property(ctx, key: str):
         raise click.Abort()
 
 
+@main.command("import")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--table", "table_name", required=True, help="Target table name")
+@click.option("--if-exists", "if_exists", type=click.Choice(["fail", "append", "replace"]), default="fail",
+              help="What to do if table exists (default: fail)")
+@click.option("--format", "file_format", type=click.Choice(["csv", "json", "ndjson"]), default=None,
+              help="File format (auto-detected from extension)")
+@click.option("--delimiter", default=",", help="CSV delimiter (default: ',')")
+@click.option("--header/--no-header", default=True, help="Whether CSV has headers (default: --header)")
+def import_file(file_path: str, table_name: str, if_exists: str, file_format: str, delimiter: str, header: bool):
+    """Import data from a CSV or JSON file into a table.
+
+    Examples:
+        lakehouse import data.csv --table expenses
+        lakehouse import data.csv --table expenses --if-exists append
+        lakehouse import data.json --table events
+        lakehouse import data.ndjson --table events --if-exists replace
+    """
+    from .catalog import get_catalog, import_file as catalog_import_file
+
+    catalog = get_catalog()
+
+    try:
+        result = catalog_import_file(
+            catalog, file_path, table_name,
+            file_format=file_format,
+            if_exists=if_exists,
+            delimiter=delimiter,
+            has_header=header,
+        )
+        console.print(
+            f"[bold green]✓ Imported {result['rows_imported']:,} rows "
+            f"from {file_path} into {result['table']}[/bold green]"
+        )
+        console.print(f"  Format: {result['format']}")
+    except FileNotFoundError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
