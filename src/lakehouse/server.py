@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table
 from .query import QueryEngine
 
 
@@ -530,6 +530,46 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["file_path", "table_name"],
+            },
+        ),
+        Tool(
+            name="export_table",
+            description=(
+                "Export an Iceberg table to CSV, JSON, NDJSON, or Parquet format. "
+                "Supports filtering with a WHERE clause, column selection, "
+                "and row limits. Auto-detects format from output path extension."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to export (e.g., 'expenses')",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["csv", "json", "ndjson", "parquet"],
+                        "description": "Output format (auto-detected from output_path extension if omitted)",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (default: <table>.<format>)",
+                    },
+                    "where": {
+                        "type": "string",
+                        "description": "SQL WHERE clause for filtering (e.g., \"amount > 100\")",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Column names to include (default: all columns)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum rows to export",
+                    },
+                },
+                "required": ["table_name"],
             },
         ),
     ]
@@ -1262,6 +1302,41 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Import error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Import failed: {str(e)}")]
+
+        elif name == "export_table":
+            table_name = arguments.get("table_name")
+            file_format = arguments.get("format")
+            output_path = arguments.get("output_path")
+            where = arguments.get("where")
+            columns = arguments.get("columns")
+            limit = arguments.get("limit")
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                result = export_table(
+                    catalog, table_name, output_path,
+                    file_format=file_format,
+                    where=where,
+                    columns=columns,
+                    limit=limit,
+                )
+
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"✓ Exported {result['rows_exported']:,} rows "
+                        f"from `{result['table']}` to `{result['output']}` "
+                        f"(format: {result['format']}, {result['size_bytes']:,} bytes)"
+                    ),
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Export error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Export failed: {str(e)}")]
 
         else:
             return [TextContent(

@@ -823,6 +823,51 @@ def import_file(file_path: str, table_name: str, if_exists: str, file_format: st
 
 
 @main.command()
+@click.argument("table_name")
+@click.option("--format", "file_format", type=click.Choice(["csv", "json", "ndjson", "parquet"]), default=None,
+              help="Output format (auto-detected from -o extension)")
+@click.option("--output", "-o", "output_path", default=None, help="Output file path (default: <table>.<format>)")
+@click.option("--where", default=None, help="SQL WHERE clause for filtering")
+@click.option("--columns", default=None, help="Comma-separated column names to include")
+@click.option("--limit", type=int, default=None, help="Maximum rows to export")
+def export(table_name: str, file_format: str, output_path: str, where: str, columns: str, limit: int):
+    """Export a table to CSV, JSON, NDJSON, or Parquet.
+
+    Examples:
+        lakehouse export expenses --format csv -o expenses.csv
+        lakehouse export expenses -o data.json
+        lakehouse export expenses --format parquet --where "amount > 100"
+        lakehouse export expenses -o report.csv --columns id,category,amount --limit 50
+    """
+    from .catalog import get_catalog, export_table
+
+    catalog = get_catalog()
+
+    col_list = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+
+    try:
+        result = export_table(
+            catalog, table_name, output_path,
+            file_format=file_format,
+            where=where,
+            columns=col_list,
+            limit=limit,
+        )
+        console.print(
+            f"[bold green]✓ Exported {result['rows_exported']:,} rows "
+            f"from {result['table']} to {result['output']}[/bold green]"
+        )
+        console.print(f"  Format: {result['format']}")
+        console.print(f"  Size: {result['size_bytes']:,} bytes")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
 def benchmark(rows: str, output: str):
