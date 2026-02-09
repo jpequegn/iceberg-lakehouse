@@ -68,8 +68,135 @@ def init_catalog(catalog: Catalog) -> None:
         pass
 
 
+def list_namespaces(catalog: Catalog) -> list[str]:
+    """List all namespaces in the catalog.
+
+    Returns:
+        List of namespace name strings
+    """
+    namespaces = catalog.list_namespaces()
+    return [ns[0] if isinstance(ns, tuple) else ns for ns in namespaces]
+
+
+def create_namespace(
+    catalog: Catalog,
+    namespace: str,
+    properties: dict[str, str] | None = None,
+) -> dict:
+    """Create a new namespace.
+
+    Args:
+        catalog: The Iceberg catalog
+        namespace: Name of the namespace to create
+        properties: Optional properties dict
+
+    Returns:
+        Dict with creation details
+
+    Raises:
+        ValueError: If namespace already exists
+    """
+    try:
+        catalog.create_namespace(namespace, properties=properties or {})
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            raise ValueError(f"Namespace '{namespace}' already exists")
+        raise
+
+    return {
+        "namespace": namespace,
+        "properties": properties or {},
+        "message": f"Created namespace '{namespace}'",
+    }
+
+
+def drop_namespace(
+    catalog: Catalog,
+    namespace: str,
+) -> dict:
+    """Drop an empty namespace.
+
+    Args:
+        catalog: The Iceberg catalog
+        namespace: Name of the namespace to drop
+
+    Returns:
+        Dict with drop details
+
+    Raises:
+        ValueError: If namespace doesn't exist or is not empty
+    """
+    # Check if namespace exists
+    existing = [ns[0] if isinstance(ns, tuple) else ns for ns in catalog.list_namespaces()]
+    if namespace not in existing:
+        raise ValueError(f"Namespace '{namespace}' not found")
+
+    # Check if namespace has tables
+    tables = catalog.list_tables(namespace)
+    if tables:
+        table_names = [f"{ns}.{name}" for ns, name in tables]
+        raise ValueError(
+            f"Namespace '{namespace}' is not empty. "
+            f"Tables: {', '.join(table_names)}"
+        )
+
+    try:
+        catalog.drop_namespace(namespace)
+    except Exception as e:
+        raise ValueError(f"Failed to drop namespace '{namespace}': {e}")
+
+    return {
+        "namespace": namespace,
+        "message": f"Dropped namespace '{namespace}'",
+    }
+
+
+def get_namespace_properties(
+    catalog: Catalog,
+    namespace: str,
+) -> dict:
+    """Get properties for a namespace.
+
+    Args:
+        catalog: The Iceberg catalog
+        namespace: Namespace name
+
+    Returns:
+        Dict with namespace and properties
+    """
+    existing = [ns[0] if isinstance(ns, tuple) else ns for ns in catalog.list_namespaces()]
+    if namespace not in existing:
+        raise ValueError(f"Namespace '{namespace}' not found")
+
+    try:
+        props = catalog.load_namespace_properties(namespace)
+    except Exception:
+        props = {}
+
+    return {
+        "namespace": namespace,
+        "properties": dict(props) if props else {},
+    }
+
+
 def list_tables(catalog: Catalog, namespace: str = "default") -> list[str]:
-    """List all tables in the catalog."""
+    """List all tables in the catalog.
+
+    Args:
+        catalog: The Iceberg catalog
+        namespace: Namespace to list (default: 'default'). Use '*' for all namespaces.
+
+    Returns:
+        List of qualified table name strings
+    """
+    if namespace == "*":
+        all_tables = []
+        for ns in catalog.list_namespaces():
+            ns_name = ns[0] if isinstance(ns, tuple) else ns
+            tables = catalog.list_tables(ns_name)
+            all_tables.extend(f"{n}.{name}" for n, name in tables)
+        return all_tables
+
     tables = catalog.list_tables(namespace)
     return [f"{ns}.{name}" for ns, name in tables]
 
