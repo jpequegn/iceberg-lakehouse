@@ -27,6 +27,7 @@ DEFAULT_CATALOG_DB = Path.home() / ".lakehouse" / "catalog.db"
 def get_catalog(
     warehouse_path: Optional[Path] = None,
     catalog_db: Optional[Path] = None,
+    name: str = "lakehouse",
 ) -> Catalog:
     """Get or create the Iceberg catalog.
 
@@ -40,7 +41,7 @@ def get_catalog(
     catalog_path.parent.mkdir(parents=True, exist_ok=True)
 
     catalog = SqlCatalog(
-        "lakehouse",
+        name,
         **{
             "uri": f"sqlite:///{catalog_path}",
             "warehouse": f"file://{warehouse}",
@@ -1623,6 +1624,239 @@ def profile_table(
         "row_count": row_count,
         "column_count": len(profile_fields),
         "columns": col_stats,
+    }
+
+
+def _count_data_files(table) -> tuple[int, int]:
+    """Count data files and total size for the current snapshot.
+
+    Returns:
+        Tuple of (file_count, total_size_in_bytes)
+    """
+    file_count = 0
+    total_size = 0
+    try:
+        for task in table.scan().plan_files():
+            file_count += 1
+            total_size += task.file.file_size_in_bytes
+    except Exception:
+        pass
+    return file_count, total_size
+
+
+def _get_table_data_dir(table) -> Path:
+    """Get the data directory path for a table on disk."""
+    location = table.metadata.location
+    if location.startswith("file://"):
+        base_path = Path(location[len("file://"):])
+    else:
+        base_path = Path(location)
+    return base_path / "data"
+
+
+def _find_orphan_files(table) -> tuple[list[str], int]:
+    """Find orphan data files not referenced by any snapshot.
+
+    Returns:
+        Tuple of (list_of_orphan_file_paths, total_orphan_bytes)
+    """
+    # Collect all referenced file paths across all remaining snapshots
+    referenced = set()
+    for snapshot in table.snapshots():
+        try:
+            for task in table.scan(snapshot_id=snapshot.snapshot_id).plan_files():
+                referenced.add(task.file.file_path)
+        except Exception:
+            pass
+
+    # Walk the data directory for actual files on disk
+    data_dir = _get_table_data_dir(table)
+    if not data_dir.exists():
+        return [], 0
+
+    orphan_files = []
+    orphan_bytes = 0
+    for f in data_dir.rglob("*.parquet"):
+        file_url = f"file://{f}"
+        if file_url not in referenced:
+            orphan_files.append(str(f))
+            orphan_bytes += f.stat().st_size
+
+    return orphan_files, orphan_bytes
+
+
+def compact_table(
+    catalog: Catalog,
+    table_name: str,
+    target_size_mb: int = 128,
+) -> dict:
+    """Compact a table by rewriting data files into fewer, larger files.
+
+    After many INSERT/UPDATE/DELETE operations, tables accumulate small files
+    that hurt query performance. Compaction reads all data and writes it back
+    as fewer consolidated files.
+
+    Note: Run expire_snapshots and cleanup_orphans after compaction to
+    remove old data files from disk.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        target_size_mb: Target file size in MB (informational; PyIceberg controls actual splitting)
+
+    Returns:
+        Dict with compaction details: files_before, files_after, sizes, etc.
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    # Count files before compaction
+    files_before, size_before = _count_data_files(table)
+
+    # Read all current data
+    try:
+        arrow_table = table.scan().to_arrow()
+    except Exception:
+        arrow_table = None
+
+    if arrow_table is None or arrow_table.num_rows == 0:
+        return {
+            "table": table_name,
+            "files_before": files_before,
+            "files_after": files_before,
+            "size_before": size_before,
+            "size_after": size_before,
+            "rows": 0,
+            "message": "Table is empty, nothing to compact",
+        }
+
+    row_count = arrow_table.num_rows
+
+    # Overwrite with combined data (consolidates into fewer files)
+    table.overwrite(arrow_table)
+
+    # Re-load to get updated metadata
+    table = catalog.load_table(table_name)
+    files_after, size_after = _count_data_files(table)
+
+    return {
+        "table": table_name,
+        "files_before": files_before,
+        "files_after": files_after,
+        "size_before": size_before,
+        "size_after": size_after,
+        "rows": row_count,
+        "message": f"Compacted from {files_before} to {files_after} file(s)",
+    }
+
+
+def maintenance_status(
+    catalog: Catalog,
+    table_name: str,
+) -> dict:
+    """Get maintenance status for a table.
+
+    Reports data file count, sizes, snapshot count, and orphan files.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+
+    Returns:
+        Dict with maintenance status details
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    # Count current data files
+    data_files, total_size = _count_data_files(table)
+    avg_size = total_size // data_files if data_files > 0 else 0
+
+    # Count snapshots
+    snapshot_count = len(list(table.snapshots()))
+
+    # Count orphan files
+    orphan_files, orphan_bytes = _find_orphan_files(table)
+
+    return {
+        "table": table_name,
+        "data_files": data_files,
+        "total_size_bytes": total_size,
+        "avg_file_size": avg_size,
+        "snapshots": snapshot_count,
+        "orphan_files": len(orphan_files),
+        "orphan_bytes": orphan_bytes,
+    }
+
+
+def cleanup_orphans(
+    catalog: Catalog,
+    table_name: str,
+    dry_run: bool = True,
+) -> dict:
+    """Clean up orphan data files not referenced by any snapshot.
+
+    Orphan files accumulate after compaction and snapshot expiration. These
+    are data files on disk that no snapshot references anymore.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        dry_run: If True, report orphans but don't delete them
+
+    Returns:
+        Dict with cleanup details: files found, removed, bytes reclaimed
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    orphan_files, orphan_bytes = _find_orphan_files(table)
+
+    if not orphan_files:
+        return {
+            "table": table_name,
+            "orphan_files_found": 0,
+            "orphan_files_removed": 0,
+            "bytes_reclaimed": 0,
+            "dry_run": dry_run,
+            "message": "No orphan files found",
+        }
+
+    removed = 0
+    if not dry_run:
+        for f in orphan_files:
+            try:
+                Path(f).unlink()
+                removed += 1
+            except OSError:
+                pass
+
+    return {
+        "table": table_name,
+        "orphan_files_found": len(orphan_files),
+        "orphan_files_removed": removed if not dry_run else 0,
+        "bytes_reclaimed": orphan_bytes if not dry_run else 0,
+        "dry_run": dry_run,
+        "files": orphan_files,
+        "message": (
+            f"Found {len(orphan_files)} orphan file(s) ({orphan_bytes:,} bytes)"
+            + (" [dry run]" if dry_run else f", removed {removed}")
+        ),
     }
 
 
