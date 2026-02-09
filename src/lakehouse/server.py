@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans, create_table, get_partitions, get_partition_stats
 from .query import QueryEngine
 
 
@@ -654,6 +654,69 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "description": "If true, report orphans without deleting (default: true)",
                         "default": True,
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="create_table",
+            description=(
+                "Create a new Iceberg table with columns and optional partitioning. "
+                "Columns are specified as a dict mapping names to types "
+                "(string, long, int, double, float, date, timestamp, boolean). "
+                "Partitions use transform syntax: identity(col), year(col), month(col), "
+                "day(col), hour(col), bucket(n, col), truncate(n, col)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the new table (e.g., 'events')",
+                    },
+                    "columns": {
+                        "type": "object",
+                        "description": "Column definitions as {name: type} (e.g., {\"id\": \"long\", \"name\": \"string\"})",
+                    },
+                    "partitions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Partition transforms (e.g., ['month(event_date)', 'identity(category)'])",
+                    },
+                },
+                "required": ["table_name", "columns"],
+            },
+        ),
+        Tool(
+            name="get_partitions",
+            description=(
+                "Get the partition spec for a table, showing partition fields, "
+                "source columns, and transforms."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="get_partition_stats",
+            description=(
+                "Get partition data distribution for a table, showing per-partition "
+                "file counts and sizes. Useful for identifying data skew."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
                     },
                 },
                 "required": ["table_name"],
@@ -1524,6 +1587,88 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Cleanup error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Cleanup failed: {str(e)}")]
+
+        elif name == "create_table":
+            table_name = arguments.get("table_name")
+            columns = arguments.get("columns")
+            partitions = arguments.get("partitions")
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+            if not columns or not isinstance(columns, dict):
+                return [TextContent(type="text", text="Error: 'columns' parameter is required and must be an object")]
+
+            try:
+                catalog = get_catalog()
+                result = create_table(catalog, table_name, columns, partitions=partitions)
+
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Create table error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Create table failed: {str(e)}")]
+
+        elif name == "get_partitions":
+            table_name = arguments.get("table_name")
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                info = get_partitions(catalog, table_name)
+
+                if not info["is_partitioned"]:
+                    return [TextContent(
+                        type="text",
+                        text=f"Table `{info['table']}` is not partitioned.",
+                    )]
+
+                lines = [f"**Partitions for `{info['table']}`:**\n"]
+                lines.append("| Name | Source Column | Transform |")
+                lines.append("|------|--------------|-----------|")
+                for f in info["fields"]:
+                    lines.append(f"| {f['name']} | {f['source_column']} | {f['transform']} |")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Partitions error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Partitions failed: {str(e)}")]
+
+        elif name == "get_partition_stats":
+            table_name = arguments.get("table_name")
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                stats = get_partition_stats(catalog, table_name)
+
+                if not stats["is_partitioned"]:
+                    return [TextContent(type="text", text=stats["message"])]
+
+                lines = [f"**Partition stats for `{stats['table']}` ({stats['total_partitions']} partition(s)):**\n"]
+                lines.append("| Partition | Files | Size |")
+                lines.append("|-----------|-------|------|")
+                for p in stats["partitions"]:
+                    lines.append(f"| {p['partition']} | {p['files']} | {p['size_bytes']:,} bytes |")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Partition stats error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Partition stats failed: {str(e)}")]
 
         else:
             return [TextContent(

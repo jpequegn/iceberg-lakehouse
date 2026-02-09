@@ -1041,6 +1041,132 @@ def cleanup(table_name: str, dry_run: bool):
         raise click.Abort()
 
 
+@main.command("create-table")
+@click.argument("table_name")
+@click.option("--column", "-c", "columns", multiple=True, required=True,
+              help="Column definition as 'name:type' (e.g., 'id:long')")
+@click.option("--partition", "-p", "partitions", multiple=True,
+              help="Partition spec (e.g., 'month(date)', 'identity(category)', 'bucket(16, id)')")
+def create_table_cmd(table_name: str, columns: tuple, partitions: tuple):
+    """Create a new Iceberg table with optional partitioning.
+
+    Examples:
+        lakehouse create-table events -c id:long -c name:string
+        lakehouse create-table events -c event_date:date -c category:string -c value:double -p "month(event_date)" -p "identity(category)"
+        lakehouse create-table users -c id:long -c name:string -p "bucket(16, id)"
+    """
+    from .catalog import get_catalog, create_table
+
+    # Parse column definitions
+    col_dict = {}
+    for col_def in columns:
+        if ":" not in col_def:
+            console.print(f"[bold red]Error:[/bold red] Invalid column format '{col_def}'. Expected 'name:type'.")
+            raise click.Abort()
+        name, col_type = col_def.split(":", 1)
+        col_dict[name.strip()] = col_type.strip()
+
+    catalog = get_catalog()
+
+    try:
+        result = create_table(catalog, table_name, col_dict, partitions=list(partitions) if partitions else None)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+        if result["partitions"]:
+            console.print(f"  Partitions: {', '.join(result['partitions'])}")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("partitions")
+@click.argument("table_name")
+def partitions_cmd(table_name: str):
+    """Show partition spec for a table.
+
+    Examples:
+        lakehouse partitions expenses
+    """
+    from .catalog import get_catalog, get_partitions
+
+    catalog = get_catalog()
+
+    try:
+        info = get_partitions(catalog, table_name)
+
+        if not info["is_partitioned"]:
+            console.print(f"[yellow]Table {info['table']} is not partitioned.[/yellow]")
+            return
+
+        console.print(f"\n[bold]Partitions for {info['table']}:[/bold]\n")
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Name")
+        table.add_column("Source Column")
+        table.add_column("Transform")
+
+        for field in info["fields"]:
+            table.add_row(
+                field["name"],
+                field["source_column"],
+                field["transform"],
+            )
+
+        console.print(table)
+
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("partition-stats")
+@click.argument("table_name")
+def partition_stats_cmd(table_name: str):
+    """Show partition data distribution.
+
+    Examples:
+        lakehouse partition-stats expenses
+    """
+    from .catalog import get_catalog, get_partition_stats
+
+    catalog = get_catalog()
+
+    try:
+        stats = get_partition_stats(catalog, table_name)
+
+        if not stats["is_partitioned"]:
+            console.print(f"[yellow]{stats['message']}[/yellow]")
+            return
+
+        console.print(f"\n[bold]Partition stats for {stats['table']} ({stats['total_partitions']} partition(s)):[/bold]\n")
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Partition")
+        table.add_column("Files", justify="right")
+        table.add_column("Size", justify="right")
+
+        for p in stats["partitions"]:
+            table.add_row(
+                p["partition"],
+                str(p["files"]),
+                f"{p['size_bytes']:,} bytes",
+            )
+
+        console.print(table)
+
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

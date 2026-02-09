@@ -16,7 +16,15 @@ from pyiceberg.types import (
     NestedField,
 )
 from pyiceberg.partitioning import PartitionSpec, PartitionField
-from pyiceberg.transforms import MonthTransform
+from pyiceberg.transforms import (
+    MonthTransform,
+    YearTransform,
+    DayTransform,
+    HourTransform,
+    IdentityTransform,
+    BucketTransform,
+    TruncateTransform,
+)
 import pyarrow as pa
 
 
@@ -1857,6 +1865,303 @@ def cleanup_orphans(
             f"Found {len(orphan_files)} orphan file(s) ({orphan_bytes:,} bytes)"
             + (" [dry run]" if dry_run else f", removed {removed}")
         ),
+    }
+
+
+def _parse_transform(transform_str: str):
+    """Parse a partition transform string into a PyIceberg Transform object.
+
+    Supported formats:
+        identity(col)        -> IdentityTransform(), col
+        year(col)            -> YearTransform(), col
+        month(col)           -> MonthTransform(), col
+        day(col)             -> DayTransform(), col
+        hour(col)            -> HourTransform(), col
+        bucket(n, col)       -> BucketTransform(n), col
+        truncate(n, col)     -> TruncateTransform(n), col
+
+    Returns:
+        Tuple of (transform_object, column_name)
+    """
+    import re
+
+    transform_str = transform_str.strip()
+    match = re.match(r'^(\w+)\((.+)\)$', transform_str)
+    if not match:
+        raise ValueError(
+            f"Invalid partition transform: '{transform_str}'. "
+            f"Expected format like 'month(column)' or 'bucket(16, column)'."
+        )
+
+    func_name = match.group(1).lower()
+    args_str = match.group(2).strip()
+
+    simple_transforms = {
+        "identity": IdentityTransform,
+        "year": YearTransform,
+        "month": MonthTransform,
+        "day": DayTransform,
+        "hour": HourTransform,
+    }
+
+    if func_name in simple_transforms:
+        return simple_transforms[func_name](), args_str.strip()
+
+    if func_name == "bucket":
+        parts = [p.strip() for p in args_str.split(",")]
+        if len(parts) != 2:
+            raise ValueError(
+                f"bucket transform requires 2 args: bucket(n, column). Got: '{transform_str}'"
+            )
+        try:
+            n = int(parts[0])
+        except ValueError:
+            raise ValueError(f"bucket size must be an integer, got '{parts[0]}'")
+        return BucketTransform(n), parts[1]
+
+    if func_name == "truncate":
+        parts = [p.strip() for p in args_str.split(",")]
+        if len(parts) != 2:
+            raise ValueError(
+                f"truncate transform requires 2 args: truncate(n, column). Got: '{transform_str}'"
+            )
+        try:
+            n = int(parts[0])
+        except ValueError:
+            raise ValueError(f"truncate width must be an integer, got '{parts[0]}'")
+        return TruncateTransform(n), parts[1]
+
+    raise ValueError(
+        f"Unknown partition transform '{func_name}'. "
+        f"Supported: identity, year, month, day, hour, bucket, truncate."
+    )
+
+
+def create_table(
+    catalog: Catalog,
+    table_name: str,
+    columns: dict[str, str],
+    partitions: list[str] | None = None,
+) -> dict:
+    """Create a new Iceberg table with optional partition spec.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        columns: Dict mapping column names to type strings
+                 (string, long, int, double, float, date, timestamp, boolean)
+        partitions: List of partition transform strings like 'month(date)', 'identity(category)'
+
+    Returns:
+        Dict with table details: table, columns, partitions
+
+    Raises:
+        ValueError: If column types are invalid or partitions reference unknown columns
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    if not columns:
+        raise ValueError("columns must not be empty")
+
+    # Build schema
+    from pyiceberg.types import BooleanType
+    extended_type_map = {
+        "string": StringType,
+        "long": LongType,
+        "int": LongType,
+        "integer": LongType,
+        "double": DoubleType,
+        "float": DoubleType,
+        "timestamp": TimestampType,
+        "date": DateType,
+        "boolean": BooleanType,
+    }
+
+    fields = []
+    col_name_to_id = {}
+    for i, (col_name, col_type_str) in enumerate(columns.items()):
+        type_key = col_type_str.lower().strip()
+        if type_key not in extended_type_map:
+            raise ValueError(
+                f"Unsupported column type '{col_type_str}' for column '{col_name}'. "
+                f"Supported types: {', '.join(sorted(extended_type_map.keys()))}"
+            )
+        field_id = i + 1
+        fields.append(
+            NestedField(field_id, col_name, extended_type_map[type_key](), required=False)
+        )
+        col_name_to_id[col_name] = field_id
+
+    schema = Schema(*fields)
+
+    # Build partition spec
+    partition_spec = PartitionSpec()
+    partition_descriptions = []
+    if partitions:
+        partition_fields = []
+        for idx, part_str in enumerate(partitions):
+            transform, col_name = _parse_transform(part_str)
+            if col_name not in col_name_to_id:
+                raise ValueError(
+                    f"Partition column '{col_name}' not found in table columns. "
+                    f"Available: {sorted(col_name_to_id.keys())}"
+                )
+            source_id = col_name_to_id[col_name]
+            # Generate a descriptive name
+            transform_name = str(transform)
+            if transform_name in ("identity",):
+                part_name = col_name
+            else:
+                part_name = f"{col_name}_{transform_name.split('[')[0]}"
+
+            partition_fields.append(
+                PartitionField(
+                    source_id=source_id,
+                    field_id=1000 + idx,
+                    transform=transform,
+                    name=part_name,
+                )
+            )
+            partition_descriptions.append(part_str)
+        partition_spec = PartitionSpec(*partition_fields)
+
+    try:
+        catalog.create_table(
+            identifier=table_name,
+            schema=schema,
+            partition_spec=partition_spec,
+        )
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            raise ValueError(f"Table '{table_name}' already exists")
+        raise
+
+    return {
+        "table": table_name,
+        "columns": list(columns.keys()),
+        "partitions": partition_descriptions,
+        "message": f"Created table '{table_name}' with {len(columns)} column(s)"
+                   + (f" and {len(partition_descriptions)} partition(s)" if partition_descriptions else ""),
+    }
+
+
+def get_partitions(
+    catalog: Catalog,
+    table_name: str,
+) -> dict:
+    """Get partition spec and info for a table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+
+    Returns:
+        Dict with partition spec details and per-partition file counts
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    schema = table.schema()
+    spec = table.spec()
+
+    # Build field_id -> name lookup
+    field_id_to_name = {f.field_id: f.name for f in schema.fields}
+
+    partition_fields = []
+    for pf in spec.fields:
+        source_name = field_id_to_name.get(pf.source_id, f"unknown({pf.source_id})")
+        partition_fields.append({
+            "field_id": pf.field_id,
+            "source_column": source_name,
+            "transform": str(pf.transform),
+            "name": pf.name,
+        })
+
+    return {
+        "table": table_name,
+        "partition_spec": str(spec),
+        "fields": partition_fields,
+        "is_partitioned": len(partition_fields) > 0,
+    }
+
+
+def get_partition_stats(
+    catalog: Catalog,
+    table_name: str,
+) -> dict:
+    """Get partition data distribution statistics.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+
+    Returns:
+        Dict with per-partition file counts and sizes
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    spec = table.spec()
+    if not spec.fields:
+        return {
+            "table": table_name,
+            "is_partitioned": False,
+            "partitions": [],
+            "message": "Table is not partitioned",
+        }
+
+    # Scan plan_files to get per-partition info
+    partition_stats: dict[str, dict] = {}
+    try:
+        for task in table.scan().plan_files():
+            # Get the partition key from the file path
+            file_path = task.file.file_path
+            file_size = task.file.file_size_in_bytes
+
+            # Extract partition from path: .../data/<partition_key>/<file>.parquet
+            # or just .../data/<file>.parquet for unpartitioned
+            parts = file_path.split("/data/")
+            if len(parts) > 1:
+                after_data = parts[1]
+                segments = after_data.split("/")
+                if len(segments) > 1:
+                    partition_key = "/".join(segments[:-1])
+                else:
+                    partition_key = "(unpartitioned)"
+            else:
+                partition_key = "(unpartitioned)"
+
+            if partition_key not in partition_stats:
+                partition_stats[partition_key] = {"files": 0, "size_bytes": 0}
+            partition_stats[partition_key]["files"] += 1
+            partition_stats[partition_key]["size_bytes"] += file_size
+    except Exception:
+        pass
+
+    partitions = []
+    for key, stats in sorted(partition_stats.items()):
+        partitions.append({
+            "partition": key,
+            "files": stats["files"],
+            "size_bytes": stats["size_bytes"],
+        })
+
+    return {
+        "table": table_name,
+        "is_partitioned": True,
+        "total_partitions": len(partitions),
+        "partitions": partitions,
     }
 
 
