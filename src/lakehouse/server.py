@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property
 from .query import QueryEngine
 
 
@@ -420,6 +420,71 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="get_format_config",
+            description=(
+                "Get the configured file format for a table or the global default. "
+                "Shows the effective format considering config overrides and table properties."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table name to get format for (optional, returns global default if omitted)",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="set_format_config",
+            description=(
+                "Set the file format for a table or the global default. "
+                "Valid formats: 'parquet', 'vortex'. "
+                "Use table_name to set per-table format, or omit for global default."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "enum": ["parquet", "vortex"],
+                        "description": "File format to set",
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table name for per-table override (optional, sets global default if omitted)",
+                    },
+                },
+                "required": ["format"],
+            },
+        ),
+        Tool(
+            name="set_table_property",
+            description=(
+                "Set a property on an Iceberg table. "
+                "Common properties: 'write.format.default' (parquet/vortex). "
+                "Properties are stored in the Iceberg metadata."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Property key (e.g., 'write.format.default')",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Property value",
+                    },
+                },
+                "required": ["table_name", "key", "value"],
             },
         ),
     ]
@@ -1014,6 +1079,102 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     type="text",
                     text=f"Convert failed: {str(e)}",
                 )]
+
+        elif name == "get_format_config":
+            table_name = arguments.get("table_name")
+
+            try:
+                from .config import get_default_format, get_table_format, resolve_format_with_table
+
+                if table_name:
+                    catalog = get_catalog()
+                    props = {}
+                    try:
+                        tbl = catalog.load_table(
+                            f"default.{table_name}" if "." not in table_name else table_name
+                        )
+                        props = dict(tbl.properties)
+                    except Exception:
+                        pass
+
+                    effective = resolve_format_with_table(table_name, props)
+                    table_prop = props.get("write.format.default", "not set")
+
+                    return [TextContent(
+                        type="text",
+                        text=(
+                            f"Format config for `{table_name}`:\n"
+                            f"  Effective format: **{effective}**\n"
+                            f"  Table property (write.format.default): {table_prop}\n"
+                            f"  Config file default: {get_default_format()}"
+                        ),
+                    )]
+                else:
+                    from .config import get_config_summary
+                    summary = get_config_summary()
+                    lines = [f"**Global default format:** {summary['default_format']}"]
+                    if summary['table_overrides']:
+                        lines.append("\n**Per-table overrides:**")
+                        for t, f in summary['table_overrides'].items():
+                            lines.append(f"  - {t}: {f}")
+                    return [TextContent(type="text", text="\n".join(lines))]
+
+            except Exception as e:
+                return [TextContent(type="text", text=f"Config error: {str(e)}")]
+
+        elif name == "set_format_config":
+            fmt = arguments.get("format")
+            table_name = arguments.get("table_name")
+
+            if not fmt:
+                return [TextContent(type="text", text="Error: 'format' parameter is required")]
+
+            try:
+                from .config import set_default_format, set_table_format
+
+                if table_name:
+                    set_table_format(table_name, fmt)
+                    return [TextContent(
+                        type="text",
+                        text=f"✓ Set format for `{table_name}` to **{fmt}**",
+                    )]
+                else:
+                    set_default_format(fmt)
+                    return [TextContent(
+                        type="text",
+                        text=f"✓ Set global default format to **{fmt}**",
+                    )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Config error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Config failed: {str(e)}")]
+
+        elif name == "set_table_property":
+            table_name = arguments.get("table_name")
+            key = arguments.get("key")
+            value = arguments.get("value")
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+            if not key:
+                return [TextContent(type="text", text="Error: 'key' parameter is required")]
+            if not value:
+                return [TextContent(type="text", text="Error: 'value' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                msg = set_table_property(catalog, table_name, key, value)
+
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(type="text", text=f"✓ {msg}")]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Property error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Property failed: {str(e)}")]
 
         else:
             return [TextContent(
