@@ -1342,6 +1342,154 @@ def _arrow_schema_to_iceberg(arrow_schema) -> Schema:
     return Schema(*fields)
 
 
+def export_table(
+    catalog: Catalog,
+    table_name: str,
+    output_path: str | Path | None = None,
+    *,
+    file_format: str | None = None,
+    where: str | None = None,
+    columns: list[str] | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Export an Iceberg table to CSV, JSON, NDJSON, or Parquet.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Source table name (with or without namespace)
+        output_path: Output file path (default: <table>.<format>)
+        file_format: Output format ('csv', 'json', 'ndjson', 'parquet').
+                     Auto-detected from output_path extension if None.
+        where: SQL WHERE clause for filtering rows
+        columns: List of column names to include
+        limit: Maximum number of rows to export
+
+    Returns:
+        Dict with export details: table, output, rows_exported, format
+
+    Raises:
+        ValueError: If table not found, format unknown, or columns invalid
+    """
+    import duckdb
+    import pyarrow.csv as pa_csv
+    import pyarrow.parquet as pq
+    import json as json_mod
+
+    # Normalize table name
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    short_name = table_name.split(".")[-1]
+
+    # Load table
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    # Resolve format
+    if file_format is None and output_path is not None:
+        ext = Path(output_path).suffix.lower()
+        ext_map = {
+            ".csv": "csv",
+            ".tsv": "csv",
+            ".json": "json",
+            ".ndjson": "ndjson",
+            ".jsonl": "ndjson",
+            ".parquet": "parquet",
+        }
+        file_format = ext_map.get(ext)
+
+    if file_format is None:
+        file_format = "csv"
+
+    if file_format not in ("csv", "json", "ndjson", "parquet"):
+        raise ValueError(
+            f"Unsupported format '{file_format}'. "
+            f"Supported: csv, json, ndjson, parquet."
+        )
+
+    # Default output path
+    if output_path is None:
+        ext_for_format = {"csv": ".csv", "json": ".json", "ndjson": ".ndjson", "parquet": ".parquet"}
+        output_path = Path(f"{short_name}{ext_for_format[file_format]}")
+    else:
+        output_path = Path(output_path)
+
+    # Read table data
+    try:
+        arrow_table = table.scan().to_arrow()
+    except Exception:
+        arrow_table = pa.table({f.name: pa.array([], type=_iceberg_type_to_arrow(str(f.field_type)) or pa.string()) for f in table.schema().fields})
+
+    # Apply WHERE filter via DuckDB
+    if where:
+        conn = duckdb.connect(":memory:")
+        conn.register("source", arrow_table)
+        arrow_table = conn.execute(f"SELECT * FROM source WHERE {where}").fetch_arrow_table()
+        conn.close()
+
+    # Apply column selection
+    if columns:
+        available = set(arrow_table.column_names)
+        invalid = [c for c in columns if c not in available]
+        if invalid:
+            raise ValueError(
+                f"Columns not found in table: {invalid}. "
+                f"Available: {sorted(available)}"
+            )
+        arrow_table = arrow_table.select(columns)
+
+    # Apply row limit
+    if limit is not None and limit < arrow_table.num_rows:
+        arrow_table = arrow_table.slice(0, limit)
+
+    # Ensure output directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write output
+    rows_exported = arrow_table.num_rows
+
+    if file_format == "csv":
+        pa_csv.write_csv(arrow_table, str(output_path))
+    elif file_format == "json":
+        # Write as JSON array
+        rows = arrow_table.to_pydict()
+        records = []
+        for i in range(arrow_table.num_rows):
+            record = {}
+            for col_name in arrow_table.column_names:
+                val = rows[col_name][i]
+                # Convert non-JSON-serializable types
+                if hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                record[col_name] = val
+            records.append(record)
+        output_path.write_text(json_mod.dumps(records, indent=2, default=str))
+    elif file_format == "ndjson":
+        rows = arrow_table.to_pydict()
+        lines = []
+        for i in range(arrow_table.num_rows):
+            record = {}
+            for col_name in arrow_table.column_names:
+                val = rows[col_name][i]
+                if hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                record[col_name] = val
+            lines.append(json_mod.dumps(record, default=str))
+        output_path.write_text("\n".join(lines) + "\n")
+    elif file_format == "parquet":
+        pq.write_table(arrow_table, str(output_path))
+
+    return {
+        "table": table_name,
+        "output": str(output_path),
+        "rows_exported": rows_exported,
+        "format": file_format,
+        "size_bytes": output_path.stat().st_size,
+    }
+
+
 def insert_sample_data(catalog: Catalog) -> None:
     """Insert sample data into tables."""
     import datetime
