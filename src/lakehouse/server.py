@@ -362,6 +362,39 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="query_vortex",
+            description=(
+                "Execute a SQL query directly against a Vortex file. "
+                "Uses the DuckDB Vortex extension if available, otherwise "
+                "falls back to Arrow bridge. The file is registered as a "
+                "table with the given name (default: 'data')."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "SQL query to execute (use the table_name in FROM clause)",
+                    },
+                    "vortex_path": {
+                        "type": "string",
+                        "description": "Path to the Vortex file",
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table name for the Vortex file in SQL (default: 'data')",
+                        "default": "data",
+                    },
+                    "max_rows": {
+                        "type": "integer",
+                        "description": "Maximum rows to return (default: 1000)",
+                        "default": 1000,
+                    },
+                },
+                "required": ["sql", "vortex_path"],
+            },
+        ),
+        Tool(
             name="convert_format",
             description=(
                 "Convert an Iceberg table's data to Vortex format for faster reads. "
@@ -898,6 +931,48 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Batch failed: {str(e)}",
+                )]
+
+        elif name == "query_vortex":
+            sql = arguments.get("sql")
+            vortex_path = arguments.get("vortex_path")
+            table_name = arguments.get("table_name", "data")
+            max_rows = arguments.get("max_rows", 1000)
+
+            if not sql:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'sql' parameter is required",
+                )]
+
+            if not vortex_path:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'vortex_path' parameter is required",
+                )]
+
+            try:
+                engine = get_engine()
+                result = engine.query_vortex(sql, vortex_path, table_name=table_name, max_rows=max_rows)
+
+                if result.empty:
+                    return [TextContent(type="text", text="Query returned no results.")]
+
+                markdown = result.to_markdown(index=False)
+                return [TextContent(
+                    type="text",
+                    text=f"**Results ({len(result)} rows):**\n\n{markdown}",
+                )]
+
+            except FileNotFoundError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"File error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Query error: {str(e)}",
                 )]
 
         elif name == "convert_format":

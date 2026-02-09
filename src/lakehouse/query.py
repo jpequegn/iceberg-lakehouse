@@ -21,19 +21,38 @@ class QueryEngine:
         self.catalog = catalog or get_catalog()
         self.warehouse = warehouse_path or DEFAULT_WAREHOUSE
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
+        self._vortex_available: Optional[bool] = None
 
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
         """Get or create DuckDB connection with Iceberg extension."""
         if self._conn is None:
             self._conn = duckdb.connect(":memory:")
             self._conn.execute("INSTALL iceberg; LOAD iceberg;")
+            self._load_vortex_extension()
             self._register_tables()
         return self._conn
+
+    def _load_vortex_extension(self) -> None:
+        """Try to load the DuckDB Vortex extension."""
+        if self._vortex_available is not None:
+            return
+        try:
+            self._conn.execute("INSTALL vortex; LOAD vortex;")
+            self._vortex_available = True
+        except Exception:
+            self._vortex_available = False
+
+    @property
+    def has_vortex(self) -> bool:
+        """Whether the DuckDB Vortex extension is available."""
+        if self._vortex_available is None:
+            self._get_connection()
+        return self._vortex_available
 
     def _register_tables(self) -> None:
         """Register all Iceberg tables as DuckDB views."""
         conn = self._conn
-        if conn is None:
+        if conn is None or self.catalog is None:
             return
 
         # List all tables from catalog
@@ -54,6 +73,76 @@ class QueryEngine:
                 except Exception as e:
                     # Skip tables that can't be loaded (empty, etc.)
                     print(f"Warning: Could not register table {full_name}: {e}")
+
+    def register_vortex(self, name: str, path: str | Path) -> None:
+        """Register a Vortex file as a queryable table.
+
+        Uses the native DuckDB Vortex extension if available,
+        otherwise falls back to Arrow bridge (read via vortex-data,
+        register the Arrow table).
+
+        Args:
+            name: Table name to register as
+            path: Path to the .vortex file
+        """
+        conn = self._get_connection()
+        path = Path(path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Vortex file not found: {path}")
+
+        if self._vortex_available:
+            # Native DuckDB extension: create a view using read_vortex
+            conn.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM read_vortex('{path}')")
+        else:
+            # Arrow bridge: read via vortex-data, register as Arrow table
+            from .vortex_io import read_vortex
+            arrow_table = read_vortex(path)
+            conn.register(name, arrow_table)
+
+    def query_vortex(
+        self,
+        sql: str,
+        vortex_path: str | Path,
+        table_name: str = "data",
+        max_rows: int = 1000,
+    ) -> pd.DataFrame:
+        """Execute a SQL query against a Vortex file.
+
+        Args:
+            sql: SQL query to execute
+            vortex_path: Path to the Vortex file
+            table_name: Name to use for the table in the query
+            max_rows: Maximum rows to return
+
+        Returns:
+            DataFrame with query results
+        """
+        conn = duckdb.connect(":memory:")
+
+        vortex_path = Path(vortex_path)
+        if not vortex_path.exists():
+            raise FileNotFoundError(f"Vortex file not found: {vortex_path}")
+
+        try:
+            # Try native extension first
+            conn.execute("INSTALL vortex; LOAD vortex;")
+            conn.execute(
+                f"CREATE VIEW {table_name} AS SELECT * FROM read_vortex('{vortex_path}')"
+            )
+        except Exception:
+            # Fallback to Arrow bridge
+            from .vortex_io import read_vortex
+            arrow_table = read_vortex(vortex_path)
+            conn.register(table_name, arrow_table)
+
+        sql_upper = sql.strip().upper()
+        if sql_upper.startswith("SELECT") and "LIMIT" not in sql_upper:
+            sql = f"{sql.rstrip(';')} LIMIT {max_rows}"
+
+        result = conn.execute(sql).fetchdf()
+        conn.close()
+        return result
 
     def refresh(self) -> None:
         """Refresh table registrations (call after data changes)."""

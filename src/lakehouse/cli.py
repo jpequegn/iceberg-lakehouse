@@ -568,6 +568,51 @@ def convert(input_path: str, target_format: str, output: str, compact: bool):
         raise click.Abort()
 
 
+@main.command("query-vortex")
+@click.argument("vortex_path", type=click.Path(exists=True))
+@click.argument("sql")
+@click.option("--max-rows", default=100, help="Maximum rows to return")
+@click.option("--table-name", default="data", help="Table name to use in SQL (default: data)")
+@click.option("--format", "output_format", type=click.Choice(["table", "csv", "json"]), default="table")
+def query_vortex(vortex_path: str, sql: str, max_rows: int, table_name: str, output_format: str):
+    """Execute a SQL query against a Vortex file.
+
+    Examples:
+        lakehouse query-vortex data.vortex "SELECT * FROM data"
+        lakehouse query-vortex data.vortex "SELECT count(*) FROM data" --table-name data
+    """
+    from .query import QueryEngine
+
+    engine = QueryEngine()
+
+    try:
+        result = engine.query_vortex(sql, vortex_path, table_name=table_name, max_rows=max_rows)
+
+        if result.empty:
+            console.print("[yellow]Query returned no results.[/yellow]")
+            return
+
+        if output_format == "table":
+            table = Table(show_header=True, header_style="bold magenta")
+            for col in result.columns:
+                table.add_column(str(col))
+            for _, row in result.iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+
+        elif output_format == "csv":
+            print(result.to_csv(index=False))
+
+        elif output_format == "json":
+            print(result.to_json(orient="records", indent=2))
+
+        console.print(f"\n[dim]({len(result)} rows)[/dim]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command("convert-table")
 @click.argument("table_name")
 @click.option("--output-dir", "-o", default=".", help="Output directory for the Vortex file")
