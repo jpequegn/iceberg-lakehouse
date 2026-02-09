@@ -361,6 +361,34 @@ async def list_tools() -> list[Tool]:
                 "required": ["operations"],
             },
         ),
+        Tool(
+            name="convert_format",
+            description=(
+                "Convert an Iceberg table's data to Vortex format for faster reads. "
+                "Exports the current table data as a .vortex file. "
+                "The Iceberg table itself remains in Parquet format."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to export (e.g., 'expenses')",
+                    },
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Directory to write the Vortex file (default: current directory)",
+                        "default": ".",
+                    },
+                    "compact": {
+                        "type": "boolean",
+                        "description": "Optimize for smaller file size over read speed",
+                        "default": False,
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
     ]
 
 
@@ -870,6 +898,46 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=f"Batch failed: {str(e)}",
+                )]
+
+        elif name == "convert_format":
+            table_name = arguments.get("table_name")
+            output_dir = arguments.get("output_dir", ".")
+            compact = arguments.get("compact", False)
+
+            if not table_name:
+                return [TextContent(
+                    type="text",
+                    text="Error: 'table_name' parameter is required",
+                )]
+
+            try:
+                from .vortex_io import convert_table_to_vortex
+
+                catalog = get_catalog()
+                result = convert_table_to_vortex(
+                    catalog, table_name, output_dir, compact=compact,
+                )
+
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"✓ Exported `{result['table']}` to Vortex format.\n"
+                        f"  Output: {result['output']}\n"
+                        f"  Rows: {result['rows']:,}\n"
+                        f"  Size: {result['size_bytes']:,} bytes"
+                    ),
+                )]
+
+            except ValueError as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Convert error: {str(e)}",
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Convert failed: {str(e)}",
                 )]
 
         else:

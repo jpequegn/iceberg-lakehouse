@@ -533,5 +533,68 @@ def delete(table_name: str, filter_expr: str, force: bool):
         raise click.Abort()
 
 
+@main.command()
+@click.argument("input_path", type=click.Path(exists=True))
+@click.option("--to", "target_format", type=click.Choice(["vortex", "parquet"]), required=True, help="Target format")
+@click.option("--output", "-o", default=None, help="Output file path (default: same name with new extension)")
+@click.option("--compact", is_flag=True, help="Optimize for smaller file size (Vortex only)")
+def convert(input_path: str, target_format: str, output: str, compact: bool):
+    """Convert a file between Parquet and Vortex formats.
+
+    Examples:
+        lakehouse convert data.parquet --to vortex
+        lakehouse convert data.vortex --to parquet
+        lakehouse convert data.parquet --to vortex --compact -o out.vortex
+    """
+    from .vortex_io import convert_parquet_to_vortex, convert_vortex_to_parquet
+
+    try:
+        if target_format == "vortex":
+            result = convert_parquet_to_vortex(input_path, output, compact=compact)
+        else:
+            result = convert_vortex_to_parquet(input_path, output)
+
+        console.print(f"[bold green]✓ Converted {result['input']}[/bold green]")
+        console.print(f"  Output: {result['output']}")
+        console.print(f"  Rows: {result['rows']:,}")
+        console.print(f"  Input size:  {result['input_size']:,} bytes")
+        console.print(f"  Output size: {result['output_size']:,} bytes")
+
+        ratio = result['output_size'] / result['input_size'] if result['input_size'] > 0 else 0
+        console.print(f"  Size ratio:  {ratio:.2f}x")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("convert-table")
+@click.argument("table_name")
+@click.option("--output-dir", "-o", default=".", help="Output directory for the Vortex file")
+@click.option("--compact", is_flag=True, help="Optimize for smaller file size")
+def convert_table(table_name: str, output_dir: str, compact: bool):
+    """Export an Iceberg table to Vortex format.
+
+    Examples:
+        lakehouse convert-table expenses
+        lakehouse convert-table expenses -o ./exports --compact
+    """
+    from .catalog import get_catalog
+    from .vortex_io import convert_table_to_vortex
+
+    catalog = get_catalog()
+
+    try:
+        result = convert_table_to_vortex(catalog, table_name, output_dir, compact=compact)
+        console.print(f"[bold green]✓ Exported {result['table']} to Vortex[/bold green]")
+        console.print(f"  Output: {result['output']}")
+        console.print(f"  Rows: {result['rows']:,}")
+        console.print(f"  Size: {result['size_bytes']:,} bytes")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 if __name__ == "__main__":
     main()
