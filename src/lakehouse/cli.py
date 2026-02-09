@@ -641,5 +641,140 @@ def convert_table(table_name: str, output_dir: str, compact: bool):
         raise click.Abort()
 
 
+@main.group()
+def config():
+    """Manage lakehouse configuration."""
+    pass
+
+
+@config.command("show")
+def config_show():
+    """Show current configuration."""
+    from .config import get_config_summary
+
+    summary = get_config_summary()
+
+    console.print("[bold]Lakehouse Configuration:[/bold]\n")
+    console.print(f"  Default format: [cyan]{summary['default_format']}[/cyan]")
+
+    if summary["table_overrides"]:
+        console.print("\n  [bold]Table overrides:[/bold]")
+        for table_name, fmt in summary["table_overrides"].items():
+            console.print(f"    {table_name}: [cyan]{fmt}[/cyan]")
+    else:
+        console.print("\n  [dim]No per-table format overrides.[/dim]")
+
+
+@config.command("set-format")
+@click.argument("format_name", type=click.Choice(["parquet", "vortex"]))
+@click.option("--table", default=None, help="Set format for a specific table only")
+def config_set_format(format_name: str, table: str):
+    """Set the default file format (globally or per-table).
+
+    Examples:
+        lakehouse config set-format vortex
+        lakehouse config set-format parquet --table expenses
+    """
+    from .config import set_default_format, set_table_format
+
+    try:
+        if table:
+            set_table_format(table, format_name)
+            console.print(f"[bold green]✓ Set format for '{table}' to {format_name}[/bold green]")
+        else:
+            set_default_format(format_name)
+            console.print(f"[bold green]✓ Set default format to {format_name}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@config.command("get-format")
+@click.option("--table", default=None, help="Get format for a specific table")
+def config_get_format(table: str):
+    """Get the effective file format (globally or per-table).
+
+    Examples:
+        lakehouse config get-format
+        lakehouse config get-format --table expenses
+    """
+    from .config import get_default_format, get_table_format
+
+    if table:
+        fmt = get_table_format(table)
+        console.print(f"Effective format for '{table}': [cyan]{fmt}[/cyan]")
+    else:
+        fmt = get_default_format()
+        console.print(f"Default format: [cyan]{fmt}[/cyan]")
+
+
+@alter.command("set-property")
+@click.argument("key")
+@click.argument("value")
+@click.pass_context
+def alter_set_property(ctx, key: str, value: str):
+    """Set a property on the table.
+
+    KEY is the property name (e.g., 'write.format.default').
+    VALUE is the property value (e.g., 'vortex').
+    """
+    from .catalog import get_catalog, set_table_property
+
+    table_name = ctx.obj["table_name"]
+    catalog = get_catalog()
+
+    try:
+        msg = set_table_property(catalog, table_name, key, value)
+        console.print(f"[bold green]✓ {msg}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@alter.command("get-property")
+@click.argument("key")
+@click.pass_context
+def alter_get_property(ctx, key: str):
+    """Get a property from the table.
+
+    KEY is the property name (e.g., 'write.format.default').
+    """
+    from .catalog import get_catalog, get_table_property
+
+    table_name = ctx.obj["table_name"]
+    catalog = get_catalog()
+
+    try:
+        value = get_table_property(catalog, table_name, key)
+        if value is None:
+            console.print(f"[yellow]Property '{key}' not set on {table_name}[/yellow]")
+        else:
+            console.print(f"{key} = [cyan]{value}[/cyan]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@alter.command("remove-property")
+@click.argument("key")
+@click.pass_context
+def alter_remove_property(ctx, key: str):
+    """Remove a property from the table.
+
+    KEY is the property name to remove.
+    """
+    from .catalog import get_catalog, remove_table_property
+
+    table_name = ctx.obj["table_name"]
+    catalog = get_catalog()
+
+    try:
+        msg = remove_table_property(catalog, table_name, key)
+        console.print(f"[bold green]✓ {msg}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 if __name__ == "__main__":
     main()

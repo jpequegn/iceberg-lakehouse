@@ -1017,6 +1017,95 @@ def upsert_rows(
     return {"inserted": inserted_count, "updated": updated_count}
 
 
+def get_table_property(
+    catalog: Catalog,
+    table_name: str,
+    key: str,
+) -> str | None:
+    """Get a property from an Iceberg table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        key: Property key
+
+    Returns:
+        Property value or None if not set
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    return table.properties.get(key)
+
+
+def set_table_property(
+    catalog: Catalog,
+    table_name: str,
+    key: str,
+    value: str,
+) -> str:
+    """Set a property on an Iceberg table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        key: Property key
+        value: Property value
+
+    Returns:
+        Description of the change made
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    with table.transaction() as tx:
+        tx.set_properties({key: value})
+
+    return f"Set '{key}' = '{value}' on {table_name}"
+
+
+def remove_table_property(
+    catalog: Catalog,
+    table_name: str,
+    key: str,
+) -> str:
+    """Remove a property from an Iceberg table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        key: Property key to remove
+
+    Returns:
+        Description of the change made
+    """
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    if key not in table.properties:
+        raise ValueError(f"Property '{key}' not found on {table_name}")
+
+    with table.transaction() as tx:
+        tx.remove_properties(key)
+
+    return f"Removed '{key}' from {table_name}"
+
+
 def insert_sample_data(catalog: Catalog) -> None:
     """Insert sample data into tables."""
     import datetime
