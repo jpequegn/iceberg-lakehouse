@@ -137,20 +137,107 @@ def snapshots(table_name: str):
 
 
 @main.command()
-def tables():
+@click.option("--namespace", "-n", default="default", help="Namespace to list tables from (use '*' for all)")
+def tables(namespace: str):
     """List all tables in the lakehouse."""
     from .catalog import get_catalog, list_tables
 
     catalog = get_catalog()
-    table_list = list_tables(catalog)
+    table_list = list_tables(catalog, namespace=namespace)
 
     if not table_list:
-        console.print("[yellow]No tables found. Run 'lakehouse init' first.[/yellow]")
+        if namespace == "*":
+            console.print("[yellow]No tables found. Run 'lakehouse init' first.[/yellow]")
+        else:
+            console.print(f"[yellow]No tables found in namespace '{namespace}'.[/yellow]")
         return
 
-    console.print("[bold]Available Tables:[/bold]\n")
+    if namespace == "*":
+        console.print("[bold]All Tables:[/bold]\n")
+    else:
+        console.print(f"[bold]Tables in '{namespace}':[/bold]\n")
     for t in table_list:
         console.print(f"  • {t}")
+
+
+@main.command("namespaces")
+def namespaces_cmd():
+    """List all namespaces in the lakehouse."""
+    from .catalog import get_catalog, list_namespaces
+
+    catalog = get_catalog()
+    ns_list = list_namespaces(catalog)
+
+    if not ns_list:
+        console.print("[yellow]No namespaces found.[/yellow]")
+        return
+
+    console.print("[bold]Namespaces:[/bold]\n")
+    for ns in ns_list:
+        console.print(f"  • {ns}")
+
+
+@main.command("create-namespace")
+@click.argument("namespace")
+@click.option("--property", "-p", "properties", multiple=True,
+              help="Property as 'key=value' (e.g., 'owner=data-team')")
+def create_namespace_cmd(namespace: str, properties: tuple):
+    """Create a new namespace.
+
+    Examples:
+        lakehouse create-namespace staging
+        lakehouse create-namespace analytics -p "owner=data-team" -p "env=prod"
+    """
+    from .catalog import get_catalog, create_namespace
+
+    props = {}
+    for prop_str in properties:
+        if "=" not in prop_str:
+            console.print(f"[bold red]Error:[/bold red] Invalid property '{prop_str}'. Expected 'key=value'.")
+            raise click.Abort()
+        key, value = prop_str.split("=", 1)
+        props[key.strip()] = value.strip()
+
+    catalog = get_catalog()
+
+    try:
+        result = create_namespace(catalog, namespace, properties=props if props else None)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("drop-namespace")
+@click.argument("namespace")
+def drop_namespace_cmd(namespace: str):
+    """Drop an empty namespace.
+
+    The namespace must not contain any tables.
+
+    Examples:
+        lakehouse drop-namespace staging
+    """
+    from .catalog import get_catalog, drop_namespace
+
+    if namespace == "default":
+        console.print("[bold red]Error:[/bold red] Cannot drop the 'default' namespace.")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        result = drop_namespace(catalog, namespace)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
 
 
 @main.command()

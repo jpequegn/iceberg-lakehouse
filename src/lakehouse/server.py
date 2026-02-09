@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans, create_table, get_partitions, get_partition_stats
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans, create_table, get_partitions, get_partition_stats, list_namespaces, create_namespace, drop_namespace, get_namespace_properties
 from .query import QueryEngine
 
 
@@ -720,6 +720,65 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="list_namespaces",
+            description="List all namespaces in the catalog.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="create_namespace",
+            description=(
+                "Create a new namespace for organizing tables. "
+                "Optionally set properties like owner or description."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Name of the namespace to create (e.g., 'staging')",
+                    },
+                    "properties": {
+                        "type": "object",
+                        "description": "Optional properties (e.g., {\"owner\": \"data-team\"})",
+                    },
+                },
+                "required": ["namespace"],
+            },
+        ),
+        Tool(
+            name="drop_namespace",
+            description=(
+                "Drop an empty namespace. The namespace must not contain any tables."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Name of the namespace to drop (e.g., 'staging')",
+                    },
+                },
+                "required": ["namespace"],
+            },
+        ),
+        Tool(
+            name="get_namespace_properties",
+            description="Get properties for a namespace.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Name of the namespace",
+                    },
+                },
+                "required": ["namespace"],
             },
         ),
     ]
@@ -1669,6 +1728,91 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Partition stats error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Partition stats failed: {str(e)}")]
+
+        elif name == "list_namespaces":
+            try:
+                catalog = get_catalog()
+                namespaces = list_namespaces(catalog)
+
+                if not namespaces:
+                    return [TextContent(type="text", text="No namespaces found.")]
+
+                ns_list = "\n".join(f"- {ns}" for ns in namespaces)
+                return [TextContent(
+                    type="text",
+                    text=f"**Namespaces:**\n\n{ns_list}",
+                )]
+
+            except Exception as e:
+                return [TextContent(type="text", text=f"List namespaces failed: {str(e)}")]
+
+        elif name == "create_namespace":
+            namespace = arguments.get("namespace")
+            properties = arguments.get("properties")
+
+            if not namespace:
+                return [TextContent(type="text", text="Error: 'namespace' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                result = create_namespace(catalog, namespace, properties=properties)
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Create namespace error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Create namespace failed: {str(e)}")]
+
+        elif name == "drop_namespace":
+            namespace = arguments.get("namespace")
+
+            if not namespace:
+                return [TextContent(type="text", text="Error: 'namespace' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                result = drop_namespace(catalog, namespace)
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Drop namespace error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Drop namespace failed: {str(e)}")]
+
+        elif name == "get_namespace_properties":
+            namespace = arguments.get("namespace")
+
+            if not namespace:
+                return [TextContent(type="text", text="Error: 'namespace' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                result = get_namespace_properties(catalog, namespace)
+
+                if not result["properties"]:
+                    return [TextContent(
+                        type="text",
+                        text=f"Namespace `{namespace}` has no properties set.",
+                    )]
+
+                lines = [f"**Properties for namespace `{namespace}`:**\n"]
+                for k, v in result["properties"].items():
+                    lines.append(f"- **{k}**: {v}")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Namespace properties error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Namespace properties failed: {str(e)}")]
 
         else:
             return [TextContent(
