@@ -1106,6 +1106,242 @@ def remove_table_property(
     return f"Removed '{key}' from {table_name}"
 
 
+def import_file(
+    catalog: Catalog,
+    file_path: str | Path,
+    table_name: str,
+    *,
+    file_format: str | None = None,
+    if_exists: str = "fail",
+    delimiter: str = ",",
+    has_header: bool = True,
+) -> dict:
+    """Import data from a CSV or JSON file into an Iceberg table.
+
+    Args:
+        catalog: The Iceberg catalog
+        file_path: Path to the file to import
+        table_name: Target table name (with or without namespace)
+        file_format: File format override ('csv', 'json', 'ndjson'). Auto-detected from extension if None.
+        if_exists: What to do if the table already exists: 'fail', 'append', 'replace'
+        delimiter: CSV delimiter character (default: ',')
+        has_header: Whether CSV has a header row (default: True)
+
+    Returns:
+        Dict with import details: table, rows_imported, format
+
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        ValueError: If format is unsupported, table exists and if_exists='fail',
+                     or schema is incompatible on append
+    """
+    import pyarrow.csv as pa_csv
+    import pyarrow.json as pa_json
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    # Auto-detect format from extension
+    if file_format is None:
+        ext = file_path.suffix.lower()
+        format_map = {
+            ".csv": "csv",
+            ".tsv": "csv",
+            ".json": "json",
+            ".ndjson": "ndjson",
+            ".jsonl": "ndjson",
+        }
+        file_format = format_map.get(ext)
+        if file_format is None:
+            raise ValueError(
+                f"Cannot auto-detect format for extension '{ext}'. "
+                f"Use --format to specify (csv, json, ndjson)."
+            )
+        if ext == ".tsv":
+            delimiter = "\t"
+
+    # Read the file into a PyArrow table
+    if file_format == "csv":
+        read_options = pa_csv.ReadOptions(autogenerate_column_names=not has_header)
+        parse_options = pa_csv.ParseOptions(delimiter=delimiter)
+        arrow_table = pa_csv.read_csv(
+            str(file_path),
+            read_options=read_options,
+            parse_options=parse_options,
+        )
+    elif file_format == "json":
+        # PyArrow read_json expects NDJSON, so handle JSON arrays ourselves
+        import json as json_mod
+        import tempfile
+
+        raw = file_path.read_text()
+        parsed = json_mod.loads(raw)
+        if isinstance(parsed, list):
+            # JSON array — convert to NDJSON in a temp file
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".ndjson", delete=False) as tmp:
+                for obj in parsed:
+                    tmp.write(json_mod.dumps(obj) + "\n")
+                tmp_name = tmp.name
+            try:
+                arrow_table = pa_json.read_json(tmp_name)
+            finally:
+                Path(tmp_name).unlink(missing_ok=True)
+        else:
+            raise ValueError("JSON file must contain an array of objects.")
+    elif file_format == "ndjson":
+        arrow_table = pa_json.read_json(str(file_path))
+    else:
+        raise ValueError(
+            f"Unsupported format '{file_format}'. Supported: csv, json, ndjson."
+        )
+
+    if arrow_table.num_rows == 0:
+        raise ValueError("File contains no data rows.")
+
+    # Normalize table name
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    # Check if table exists
+    table_exists = True
+    try:
+        table = catalog.load_table(table_name)
+    except Exception:
+        table_exists = False
+
+    if table_exists:
+        if if_exists == "fail":
+            raise ValueError(
+                f"Table '{table_name}' already exists. "
+                f"Use --if-exists append or --if-exists replace."
+            )
+        elif if_exists == "replace":
+            table.overwrite(arrow_table)
+        elif if_exists == "append":
+            # Validate schema compatibility: imported columns must match table columns
+            table_schema = table.schema()
+            table_field_names = {f.name for f in table_schema.fields}
+            import_field_names = set(arrow_table.column_names)
+
+            missing_in_import = table_field_names - import_field_names
+            extra_in_import = import_field_names - table_field_names
+
+            if extra_in_import:
+                raise ValueError(
+                    f"Import file has columns not in table: {sorted(extra_in_import)}. "
+                    f"Table columns: {sorted(table_field_names)}"
+                )
+
+            # Reorder and cast columns to match table schema
+            cast_arrays = {}
+            for field in table_schema.fields:
+                if field.name in import_field_names:
+                    col = arrow_table.column(field.name)
+                    # Cast to the table's expected Arrow type
+                    target_type = _iceberg_type_to_arrow(str(field.field_type))
+                    if target_type and col.type != target_type:
+                        col = col.cast(target_type)
+                    cast_arrays[field.name] = col
+                else:
+                    # Missing column — fill with nulls
+                    target_type = _iceberg_type_to_arrow(str(field.field_type)) or pa.string()
+                    cast_arrays[field.name] = pa.array(
+                        [None] * arrow_table.num_rows, type=target_type
+                    )
+
+            arrow_table = pa.table(cast_arrays)
+            table.append(arrow_table)
+        else:
+            raise ValueError(f"Invalid if_exists value: '{if_exists}'. Use 'fail', 'append', or 'replace'.")
+    else:
+        # Create a new table from the imported schema
+        iceberg_schema = _arrow_schema_to_iceberg(arrow_table.schema)
+        catalog.create_table(identifier=table_name, schema=iceberg_schema)
+        table = catalog.load_table(table_name)
+
+        # Cast columns to match the Iceberg schema types
+        cast_arrays = {}
+        for field in table.schema().fields:
+            col = arrow_table.column(field.name)
+            target_type = _iceberg_type_to_arrow(str(field.field_type))
+            if target_type and col.type != target_type:
+                col = col.cast(target_type)
+            cast_arrays[field.name] = col
+
+        arrow_table = pa.table(cast_arrays)
+        table.append(arrow_table)
+
+    return {
+        "table": table_name,
+        "rows_imported": arrow_table.num_rows,
+        "format": file_format,
+    }
+
+
+def _iceberg_type_to_arrow(type_str: str):
+    """Convert an Iceberg type string to a PyArrow type."""
+    mapping = {
+        "long": pa.int64(),
+        "double": pa.float64(),
+        "string": pa.string(),
+        "date": pa.date32(),
+        "timestamp": pa.timestamp("us"),
+        "timestamptz": pa.timestamp("us", tz="UTC"),
+        "boolean": pa.bool_(),
+        "int": pa.int32(),
+        "float": pa.float32(),
+    }
+    return mapping.get(type_str)
+
+
+def _arrow_schema_to_iceberg(arrow_schema) -> Schema:
+    """Convert a PyArrow schema to an Iceberg Schema."""
+    from pyiceberg.types import BooleanType
+
+    arrow_to_iceberg = {
+        pa.int8(): LongType,
+        pa.int16(): LongType,
+        pa.int32(): LongType,
+        pa.int64(): LongType,
+        pa.float16(): DoubleType,
+        pa.float32(): DoubleType,
+        pa.float64(): DoubleType,
+        pa.string(): StringType,
+        pa.large_string(): StringType,
+        pa.utf8(): StringType,
+        pa.large_utf8(): StringType,
+        pa.bool_(): BooleanType,
+        pa.date32(): DateType,
+        pa.date64(): DateType,
+    }
+
+    fields = []
+    for i, arrow_field in enumerate(arrow_schema):
+        iceberg_type_cls = None
+
+        # Direct match
+        if arrow_field.type in arrow_to_iceberg:
+            iceberg_type_cls = arrow_to_iceberg[arrow_field.type]
+        # Timestamp types
+        elif pa.types.is_timestamp(arrow_field.type):
+            iceberg_type_cls = TimestampType
+        # Default to string
+        else:
+            iceberg_type_cls = StringType
+
+        fields.append(
+            NestedField(
+                field_id=i + 1,
+                name=arrow_field.name,
+                field_type=iceberg_type_cls(),
+                required=False,
+            )
+        )
+
+    return Schema(*fields)
+
+
 def insert_sample_data(catalog: Catalog) -> None:
     """Insert sample data into tables."""
     import datetime

@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file
 from .query import QueryEngine
 
 
@@ -485,6 +485,51 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name", "key", "value"],
+            },
+        ),
+        Tool(
+            name="import_file",
+            description=(
+                "Import data from a CSV or JSON file into an Iceberg table. "
+                "Auto-detects format from file extension (.csv, .json, .ndjson, .jsonl). "
+                "Creates a new table if it doesn't exist. "
+                "Use if_exists to control behavior when the table already exists: "
+                "'fail' (default), 'append', or 'replace'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to import (CSV, JSON, or NDJSON)",
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Target table name (e.g., 'expenses')",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["csv", "json", "ndjson"],
+                        "description": "File format (auto-detected from extension if omitted)",
+                    },
+                    "if_exists": {
+                        "type": "string",
+                        "enum": ["fail", "append", "replace"],
+                        "description": "What to do if table exists: fail (default), append, replace",
+                        "default": "fail",
+                    },
+                    "delimiter": {
+                        "type": "string",
+                        "description": "CSV delimiter character (default: ',')",
+                        "default": ",",
+                    },
+                    "has_header": {
+                        "type": "boolean",
+                        "description": "Whether CSV has a header row (default: true)",
+                        "default": True,
+                    },
+                },
+                "required": ["file_path", "table_name"],
             },
         ),
     ]
@@ -1175,6 +1220,48 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Property error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Property failed: {str(e)}")]
+
+        elif name == "import_file":
+            file_path = arguments.get("file_path")
+            table_name = arguments.get("table_name")
+            file_format = arguments.get("format")
+            if_exists = arguments.get("if_exists", "fail")
+            delimiter = arguments.get("delimiter", ",")
+            has_header = arguments.get("has_header", True)
+
+            if not file_path:
+                return [TextContent(type="text", text="Error: 'file_path' parameter is required")]
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                result = import_file(
+                    catalog, file_path, table_name,
+                    file_format=file_format,
+                    if_exists=if_exists,
+                    delimiter=delimiter,
+                    has_header=has_header,
+                )
+
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"✓ Imported {result['rows_imported']:,} rows "
+                        f"from `{file_path}` into `{result['table']}` "
+                        f"(format: {result['format']})"
+                    ),
+                )]
+
+            except FileNotFoundError as e:
+                return [TextContent(type="text", text=f"File error: {str(e)}")]
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Import error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Import failed: {str(e)}")]
 
         else:
             return [TextContent(
