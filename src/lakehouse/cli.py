@@ -776,5 +776,42 @@ def alter_remove_property(ctx, key: str):
         raise click.Abort()
 
 
+@main.command()
+@click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
+@click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
+def benchmark(rows: str, output: str):
+    """Run Parquet vs Vortex performance benchmarks.
+
+    Examples:
+        lakehouse benchmark
+        lakehouse benchmark --rows 1000,10000,100000
+        lakehouse benchmark -o docs/benchmarks.md
+    """
+    from benchmarks.format_comparison import run_benchmarks, generate_report
+
+    row_counts = [int(x.strip()) for x in rows.split(",")]
+
+    console.print(f"[bold blue]Running benchmarks...[/bold blue]")
+    console.print(f"  Row counts: {', '.join(f'{n:,}' for n in row_counts)}")
+    console.print(f"  Data types: numeric, string, mixed\n")
+
+    try:
+        results = run_benchmarks(row_counts=row_counts)
+        report = generate_report(results, row_counts)
+
+        if output:
+            from pathlib import Path
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(report)
+            console.print(f"[bold green]✓ Report written to {output}[/bold green]")
+        else:
+            console.print(report)
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 if __name__ == "__main__":
     main()
