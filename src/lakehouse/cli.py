@@ -868,6 +868,71 @@ def export(table_name: str, file_format: str, output_path: str, where: str, colu
 
 
 @main.command()
+@click.argument("table_name")
+@click.option("--columns", default=None, help="Comma-separated column names to profile")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def profile(table_name: str, columns: str, as_json: bool):
+    """Profile a table's data (statistics, distributions, top values).
+
+    Examples:
+        lakehouse profile expenses
+        lakehouse profile expenses --columns amount,category
+        lakehouse profile expenses --json
+    """
+    import json as json_mod
+    from .catalog import get_catalog, profile_table
+
+    catalog = get_catalog()
+    col_list = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+
+    try:
+        stats = profile_table(catalog, table_name, columns=col_list)
+
+        if as_json:
+            print(json_mod.dumps(stats, indent=2, default=str))
+            return
+
+        console.print(f"\n[bold]Table: {stats['table']}[/bold] ({stats['row_count']:,} rows, {stats['column_count']} columns)\n")
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Column")
+        table.add_column("Type")
+        table.add_column("Nulls", justify="right")
+        table.add_column("Unique", justify="right")
+        table.add_column("Min")
+        table.add_column("Max")
+        table.add_column("Mean")
+        table.add_column("Std Dev")
+
+        for col_name, col_stats in stats["columns"].items():
+            table.add_row(
+                col_name,
+                col_stats.get("type", ""),
+                str(col_stats.get("nulls", "")),
+                str(col_stats.get("unique", "")),
+                str(col_stats.get("min", "-")),
+                str(col_stats.get("max", "-")),
+                str(col_stats.get("mean", "-")) if "mean" in col_stats else "-",
+                str(col_stats.get("std", "-")) if "std" in col_stats else "-",
+            )
+
+        console.print(table)
+
+        # Print top values for string columns
+        for col_name, col_stats in stats["columns"].items():
+            if "top_values" in col_stats and col_stats["top_values"]:
+                vals = ", ".join(f"{v} ({c})" for v, c in col_stats["top_values"].items())
+                console.print(f"\n[dim]Top values for '{col_name}':[/dim] {vals}")
+
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
 def benchmark(rows: str, output: str):

@@ -1490,6 +1490,142 @@ def export_table(
     }
 
 
+def profile_table(
+    catalog: Catalog,
+    table_name: str,
+    columns: list[str] | None = None,
+) -> dict:
+    """Generate profiling statistics for an Iceberg table.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        columns: Optional list of columns to profile (default: all)
+
+    Returns:
+        Dict with table name, row count, and per-column statistics
+
+    Raises:
+        ValueError: If table not found or columns invalid
+    """
+    import duckdb
+
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    schema = table.schema()
+
+    # Read data
+    try:
+        arrow_table = table.scan().to_arrow()
+    except Exception:
+        arrow_table = pa.table({
+            f.name: pa.array([], type=_iceberg_type_to_arrow(str(f.field_type)) or pa.string())
+            for f in schema.fields
+        })
+
+    row_count = arrow_table.num_rows
+
+    # Determine which columns to profile
+    all_field_names = [f.name for f in schema.fields]
+    if columns:
+        invalid = [c for c in columns if c not in set(all_field_names)]
+        if invalid:
+            raise ValueError(
+                f"Columns not found: {invalid}. "
+                f"Available: {sorted(all_field_names)}"
+            )
+        profile_fields = [f for f in schema.fields if f.name in columns]
+    else:
+        profile_fields = list(schema.fields)
+
+    if row_count == 0:
+        col_stats = {}
+        for field in profile_fields:
+            col_stats[field.name] = {
+                "type": str(field.field_type),
+                "nulls": 0,
+                "unique": 0,
+            }
+        return {
+            "table": table_name,
+            "row_count": 0,
+            "column_count": len(profile_fields),
+            "columns": col_stats,
+        }
+
+    conn = duckdb.connect(":memory:")
+    conn.register("data", arrow_table)
+
+    col_stats = {}
+    for field in profile_fields:
+        col_name = field.name
+        field_type = str(field.field_type)
+        quoted = f'"{col_name}"'
+
+        stats: dict = {"type": field_type}
+
+        # Null count and unique count
+        basic = conn.execute(
+            f"SELECT COUNT(*) - COUNT({quoted}) AS nulls, "
+            f"COUNT(DISTINCT {quoted}) AS uniq "
+            f"FROM data"
+        ).fetchone()
+        stats["nulls"] = basic[0]
+        stats["unique"] = basic[1]
+
+        # Numeric stats
+        if field_type in ("long", "double", "int", "float"):
+            num = conn.execute(
+                f"SELECT MIN({quoted}), MAX({quoted}), "
+                f"AVG({quoted}), STDDEV({quoted}), "
+                f"PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY {quoted}), "
+                f"PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY {quoted}), "
+                f"PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY {quoted}) "
+                f"FROM data"
+            ).fetchone()
+            stats["min"] = num[0]
+            stats["max"] = num[1]
+            stats["mean"] = round(num[2], 4) if num[2] is not None else None
+            stats["std"] = round(num[3], 4) if num[3] is not None else None
+            stats["p25"] = num[4]
+            stats["p50"] = num[5]
+            stats["p75"] = num[6]
+
+        # String stats: top values
+        elif field_type == "string":
+            top_rows = conn.execute(
+                f"SELECT {quoted}, COUNT(*) AS cnt "
+                f"FROM data WHERE {quoted} IS NOT NULL "
+                f"GROUP BY {quoted} ORDER BY cnt DESC LIMIT 10"
+            ).fetchall()
+            stats["top_values"] = {row[0]: row[1] for row in top_rows}
+
+        # Date/timestamp: min and max
+        elif field_type in ("date", "timestamp", "timestamptz"):
+            minmax = conn.execute(
+                f"SELECT MIN({quoted}), MAX({quoted}) FROM data"
+            ).fetchone()
+            stats["min"] = str(minmax[0]) if minmax[0] is not None else None
+            stats["max"] = str(minmax[1]) if minmax[1] is not None else None
+
+        col_stats[col_name] = stats
+
+    conn.close()
+
+    return {
+        "table": table_name,
+        "row_count": row_count,
+        "column_count": len(profile_fields),
+        "columns": col_stats,
+    }
+
+
 def insert_sample_data(catalog: Catalog) -> None:
     """Insert sample data into tables."""
     import datetime
