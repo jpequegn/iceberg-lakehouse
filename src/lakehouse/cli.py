@@ -1254,6 +1254,174 @@ def partition_stats_cmd(table_name: str):
         raise click.Abort()
 
 
+@main.command("query-save")
+@click.argument("name")
+@click.argument("sql")
+@click.option("--description", "-d", default="", help="Description for the saved query")
+def query_save(name: str, sql: str, description: str):
+    """Save a named query for later use.
+
+    Examples:
+        lakehouse query-save monthly_totals "SELECT category, sum(amount) FROM expenses GROUP BY category"
+        lakehouse query-save top_expenses "SELECT * FROM expenses ORDER BY amount DESC LIMIT 10" -d "Top expenses"
+    """
+    from .queries import save_query
+
+    try:
+        result = save_query(name, sql, description=description)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("query-list")
+def query_list():
+    """List all saved queries."""
+    from .queries import list_saved_queries
+
+    queries = list_saved_queries()
+
+    if not queries:
+        console.print("[yellow]No saved queries.[/yellow]")
+        return
+
+    console.print(f"[bold]Saved Queries ({len(queries)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Name")
+    table.add_column("SQL")
+    table.add_column("Description")
+    table.add_column("Created")
+
+    for q in queries:
+        sql_preview = q["sql"]
+        if len(sql_preview) > 60:
+            sql_preview = sql_preview[:57] + "..."
+        table.add_row(
+            q["name"],
+            sql_preview,
+            q.get("description", ""),
+            q.get("created_at", "")[:19],
+        )
+
+    console.print(table)
+
+
+@main.command("query-run")
+@click.argument("name")
+@click.option("--max-rows", default=100, help="Maximum rows to return")
+@click.option("--format", "output_format", type=click.Choice(["table", "csv", "json"]), default="table")
+def query_run(name: str, max_rows: int, output_format: str):
+    """Run a saved query by name.
+
+    Examples:
+        lakehouse query-run monthly_totals
+        lakehouse query-run monthly_totals --format json
+    """
+    from .queries import get_saved_query
+    from .query import QueryEngine
+
+    try:
+        saved = get_saved_query(name)
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+    console.print(f"[dim]Running: {saved['sql']}[/dim]\n")
+
+    engine = QueryEngine()
+
+    try:
+        result = engine.execute(saved["sql"], max_rows=max_rows)
+
+        if result.empty:
+            console.print("[yellow]Query returned no results.[/yellow]")
+            return
+
+        if output_format == "table":
+            table = Table(show_header=True, header_style="bold magenta")
+            for col in result.columns:
+                table.add_column(str(col))
+            for _, row in result.iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+
+        elif output_format == "csv":
+            print(result.to_csv(index=False))
+
+        elif output_format == "json":
+            print(result.to_json(orient="records", indent=2))
+
+        console.print(f"\n[dim]({len(result)} rows)[/dim]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("query-delete")
+@click.argument("name")
+def query_delete(name: str):
+    """Delete a saved query.
+
+    Examples:
+        lakehouse query-delete monthly_totals
+    """
+    from .queries import delete_saved_query
+
+    try:
+        result = delete_saved_query(name)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("query-history")
+@click.option("--limit", default=20, help="Number of history entries to show")
+@click.option("--clear", "clear_flag", is_flag=True, help="Clear all history")
+def query_history(limit: int, clear_flag: bool):
+    """Show recent query history or clear it.
+
+    Examples:
+        lakehouse query-history
+        lakehouse query-history --limit 50
+        lakehouse query-history --clear
+    """
+    from .queries import get_history, clear_history
+
+    if clear_flag:
+        result = clear_history()
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+        return
+
+    history = get_history(limit=limit)
+
+    if not history:
+        console.print("[yellow]No query history.[/yellow]")
+        return
+
+    console.print(f"[bold]Query History (last {len(history)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("SQL")
+    table.add_column("Rows", justify="right")
+    table.add_column("Duration", justify="right")
+    table.add_column("Executed At")
+
+    for entry in history:
+        sql_preview = entry["sql"]
+        if len(sql_preview) > 60:
+            sql_preview = sql_preview[:57] + "..."
+        table.add_row(
+            sql_preview,
+            str(entry.get("rows_returned", "")),
+            f"{entry.get('duration_ms', '')}ms" if entry.get("duration_ms") else "",
+            entry.get("executed_at", "")[:19],
+        )
+
+    console.print(table)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

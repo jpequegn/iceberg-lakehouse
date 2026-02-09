@@ -15,6 +15,7 @@ from mcp.types import (
 
 from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans, create_table, get_partitions, get_partition_stats, list_namespaces, create_namespace, drop_namespace, get_namespace_properties
 from .query import QueryEngine
+from .queries import save_query, list_saved_queries, get_saved_query, delete_saved_query, add_history_entry, get_history, clear_history
 
 
 # Initialize server
@@ -779,6 +780,100 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["namespace"],
+            },
+        ),
+        Tool(
+            name="save_query",
+            description=(
+                "Save a named query for later use. "
+                "Queries can be recalled and executed by name."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Unique name for the query (e.g., 'monthly_totals')",
+                    },
+                    "sql": {
+                        "type": "string",
+                        "description": "SQL query to save",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional description of what the query does",
+                    },
+                },
+                "required": ["name", "sql"],
+            },
+        ),
+        Tool(
+            name="list_saved_queries",
+            description="List all saved queries with their names, SQL, and descriptions.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="run_saved_query",
+            description=(
+                "Run a previously saved query by name. "
+                "Returns the query results as a markdown table."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the saved query to run",
+                    },
+                    "max_rows": {
+                        "type": "integer",
+                        "description": "Maximum rows to return (default: 1000)",
+                        "default": 1000,
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="delete_saved_query",
+            description="Delete a saved query by name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the saved query to delete",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="get_query_history",
+            description=(
+                "Get recent query execution history. "
+                "Shows SQL, rows returned, duration, and execution time."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum history entries to return (default: 20)",
+                        "default": 20,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="clear_query_history",
+            description="Clear all query execution history.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
             },
         ),
     ]
@@ -1813,6 +1908,122 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Namespace properties error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Namespace properties failed: {str(e)}")]
+
+        elif name == "save_query":
+            query_name = arguments.get("name")
+            sql = arguments.get("sql")
+            description = arguments.get("description", "")
+
+            if not query_name:
+                return [TextContent(type="text", text="Error: 'name' parameter is required")]
+            if not sql:
+                return [TextContent(type="text", text="Error: 'sql' parameter is required")]
+
+            try:
+                result = save_query(query_name, sql, description=description)
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Save query error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Save query failed: {str(e)}")]
+
+        elif name == "list_saved_queries":
+            try:
+                queries = list_saved_queries()
+
+                if not queries:
+                    return [TextContent(type="text", text="No saved queries.")]
+
+                lines = [f"**Saved Queries ({len(queries)}):**\n"]
+                for q in queries:
+                    desc = f" - {q['description']}" if q.get("description") else ""
+                    lines.append(f"- **{q['name']}**: `{q['sql']}`{desc}")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            except Exception as e:
+                return [TextContent(type="text", text=f"List queries failed: {str(e)}")]
+
+        elif name == "run_saved_query":
+            query_name = arguments.get("name")
+            max_rows = arguments.get("max_rows", 1000)
+
+            if not query_name:
+                return [TextContent(type="text", text="Error: 'name' parameter is required")]
+
+            try:
+                saved = get_saved_query(query_name)
+                sql = saved["sql"]
+
+                engine = get_engine()
+                result = engine.execute(sql, max_rows=max_rows)
+
+                if result.empty:
+                    return [TextContent(type="text", text=f"Query `{query_name}` returned no results.")]
+
+                markdown = result.to_markdown(index=False)
+                return [TextContent(
+                    type="text",
+                    text=f"**Results for `{query_name}` ({len(result)} rows):**\n\n{markdown}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Run query error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Run query failed: {str(e)}")]
+
+        elif name == "delete_saved_query":
+            query_name = arguments.get("name")
+
+            if not query_name:
+                return [TextContent(type="text", text="Error: 'name' parameter is required")]
+
+            try:
+                result = delete_saved_query(query_name)
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Delete query error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Delete query failed: {str(e)}")]
+
+        elif name == "get_query_history":
+            limit = arguments.get("limit", 20)
+
+            try:
+                history = get_history(limit=limit)
+
+                if not history:
+                    return [TextContent(type="text", text="No query history.")]
+
+                lines = [f"**Query History (last {len(history)}):**\n"]
+                for entry in history:
+                    duration = f" ({entry['duration_ms']}ms)" if entry.get("duration_ms") else ""
+                    rows = f" → {entry['rows_returned']} rows" if entry.get("rows_returned") else ""
+                    lines.append(f"- `{entry['sql']}`{rows}{duration} at {entry.get('executed_at', '')[:19]}")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            except Exception as e:
+                return [TextContent(type="text", text=f"History failed: {str(e)}")]
+
+        elif name == "clear_query_history":
+            try:
+                result = clear_history()
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except Exception as e:
+                return [TextContent(type="text", text=f"Clear history failed: {str(e)}")]
 
         else:
             return [TextContent(
