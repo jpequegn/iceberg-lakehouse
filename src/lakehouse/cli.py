@@ -933,6 +933,115 @@ def profile(table_name: str, columns: str, as_json: bool):
 
 
 @main.command()
+@click.argument("table_name", required=False)
+@click.option("--all", "compact_all", is_flag=True, help="Compact all tables")
+@click.option("--target-size-mb", type=int, default=128, help="Target file size in MB (default: 128)")
+def compact(table_name: str, compact_all: bool, target_size_mb: int):
+    """Compact a table by rewriting small files into fewer large files.
+
+    Examples:
+        lakehouse compact expenses
+        lakehouse compact expenses --target-size-mb 128
+        lakehouse compact --all
+    """
+    from .catalog import get_catalog, compact_table, list_tables
+
+    if not table_name and not compact_all:
+        console.print("[bold red]Error:[/bold red] Provide a table name or use --all")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    if compact_all:
+        tables = list_tables(catalog)
+        if not tables:
+            console.print("[yellow]No tables found.[/yellow]")
+            return
+
+        for tbl in tables:
+            try:
+                result = compact_table(catalog, tbl, target_size_mb=target_size_mb)
+                console.print(
+                    f"[bold green]✓[/bold green] {tbl}: {result['message']} "
+                    f"({result['rows']:,} rows)"
+                )
+            except Exception as e:
+                console.print(f"[bold red]✗[/bold red] {tbl}: {e}")
+    else:
+        try:
+            result = compact_table(catalog, table_name, target_size_mb=target_size_mb)
+            console.print(f"[bold green]✓ {result['message']}[/bold green]")
+            console.print(f"  Rows: {result['rows']:,}")
+            console.print(f"  Size: {result['size_before']:,} → {result['size_after']:,} bytes")
+        except Exception as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            raise click.Abort()
+
+
+@main.command("maintenance-status")
+@click.argument("table_name")
+def maintenance_status_cmd(table_name: str):
+    """Show maintenance status for a table (file count, sizes, orphans).
+
+    Examples:
+        lakehouse maintenance-status expenses
+    """
+    from .catalog import get_catalog, maintenance_status
+
+    catalog = get_catalog()
+
+    try:
+        status = maintenance_status(catalog, table_name)
+
+        console.print(f"\n[bold]Maintenance Status: {status['table']}[/bold]\n")
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Metric")
+        table.add_column("Value", justify="right")
+
+        table.add_row("Data files", str(status["data_files"]))
+        table.add_row("Total size", f"{status['total_size_bytes']:,} bytes")
+        table.add_row("Avg file size", f"{status['avg_file_size']:,} bytes")
+        table.add_row("Snapshots", str(status["snapshots"]))
+        table.add_row("Orphan files", str(status["orphan_files"]))
+        table.add_row("Orphan size", f"{status['orphan_bytes']:,} bytes")
+
+        console.print(table)
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
+@click.argument("table_name")
+@click.option("--dry-run", is_flag=True, help="Report orphans without deleting")
+def cleanup(table_name: str, dry_run: bool):
+    """Clean up orphan files not referenced by any snapshot.
+
+    Examples:
+        lakehouse cleanup expenses --dry-run
+        lakehouse cleanup expenses
+    """
+    from .catalog import get_catalog, cleanup_orphans
+
+    catalog = get_catalog()
+
+    try:
+        result = cleanup_orphans(catalog, table_name, dry_run=dry_run)
+        if result["orphan_files_found"] == 0:
+            console.print("[green]No orphan files found.[/green]")
+        else:
+            console.print(f"[bold green]✓ {result['message']}[/bold green]")
+            if dry_run:
+                for f in result.get("files", []):
+                    console.print(f"  [dim]{f}[/dim]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
 def benchmark(rows: str, output: str):

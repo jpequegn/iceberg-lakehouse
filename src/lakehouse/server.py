@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans
 from .query import QueryEngine
 
 
@@ -590,6 +590,70 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Column names to profile (default: all columns)",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="compact_table",
+            description=(
+                "Compact a table by rewriting many small data files into fewer large files. "
+                "Improves query performance after many INSERT/UPDATE/DELETE operations. "
+                "After compaction, run expire_snapshots and cleanup_orphans to free disk space."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to compact (e.g., 'expenses')",
+                    },
+                    "target_size_mb": {
+                        "type": "integer",
+                        "description": "Target file size in MB (default: 128)",
+                        "default": 128,
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="maintenance_status",
+            description=(
+                "Show maintenance status for a table: data file count, sizes, "
+                "snapshot count, and orphan file count. Use this to determine "
+                "if compaction or cleanup is needed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="cleanup_orphans",
+            description=(
+                "Clean up orphan data files not referenced by any snapshot. "
+                "Orphans accumulate after compaction and snapshot expiration. "
+                "Use dry_run=true to preview without deleting."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, report orphans without deleting (default: true)",
+                        "default": True,
                     },
                 },
                 "required": ["table_name"],
@@ -1382,6 +1446,84 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Profile error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Profile failed: {str(e)}")]
+
+        elif name == "compact_table":
+            table_name = arguments.get("table_name")
+            target_size_mb = arguments.get("target_size_mb", 128)
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                result = compact_table(catalog, table_name, target_size_mb=target_size_mb)
+
+                engine = get_engine()
+                engine.refresh()
+
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"✓ {result['message']}\n"
+                        f"  Rows: {result['rows']:,}\n"
+                        f"  Size: {result['size_before']:,} → {result['size_after']:,} bytes"
+                    ),
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Compact error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Compact failed: {str(e)}")]
+
+        elif name == "maintenance_status":
+            table_name = arguments.get("table_name")
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                status = maintenance_status(catalog, table_name)
+
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"**Maintenance status for `{status['table']}`:**\n\n"
+                        f"| Metric | Value |\n|--------|-------|\n"
+                        f"| Data files | {status['data_files']} |\n"
+                        f"| Total size | {status['total_size_bytes']:,} bytes |\n"
+                        f"| Avg file size | {status['avg_file_size']:,} bytes |\n"
+                        f"| Snapshots | {status['snapshots']} |\n"
+                        f"| Orphan files | {status['orphan_files']} |\n"
+                        f"| Orphan size | {status['orphan_bytes']:,} bytes |"
+                    ),
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Status error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Status failed: {str(e)}")]
+
+        elif name == "cleanup_orphans":
+            table_name = arguments.get("table_name")
+            dry_run = arguments.get("dry_run", True)
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                result = cleanup_orphans(catalog, table_name, dry_run=dry_run)
+
+                return [TextContent(
+                    type="text",
+                    text=f"✓ {result['message']}",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Cleanup error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Cleanup failed: {str(e)}")]
 
         else:
             return [TextContent(
