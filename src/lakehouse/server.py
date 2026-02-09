@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table
 from .query import QueryEngine
 
 
@@ -567,6 +567,29 @@ async def list_tools() -> list[Tool]:
                     "limit": {
                         "type": "integer",
                         "description": "Maximum rows to export",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="profile_table",
+            description=(
+                "Profile an Iceberg table's data: row count, null counts, "
+                "unique values, min/max, mean/stddev for numeric columns, "
+                "and top values for string columns."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to profile (e.g., 'expenses')",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Column names to profile (default: all columns)",
                     },
                 },
                 "required": ["table_name"],
@@ -1337,6 +1360,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Export error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Export failed: {str(e)}")]
+
+        elif name == "profile_table":
+            table_name = arguments.get("table_name")
+            columns = arguments.get("columns")
+
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                stats = profile_table(catalog, table_name, columns=columns)
+
+                import json
+                return [TextContent(
+                    type="text",
+                    text=f"**Profile for `{stats['table']}` ({stats['row_count']:,} rows):**\n\n```json\n{json.dumps(stats, indent=2, default=str)}\n```",
+                )]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Profile error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Profile failed: {str(e)}")]
 
         else:
             return [TextContent(
