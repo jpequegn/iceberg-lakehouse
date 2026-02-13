@@ -1835,6 +1835,94 @@ def query_history(limit: int, clear_flag: bool):
 
 
 @main.command()
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def dashboard(as_json: bool):
+    """Show comprehensive lakehouse status overview.
+
+    Examples:
+        lakehouse dashboard
+        lakehouse dashboard --json
+    """
+    import json as json_mod
+    from .catalog import get_catalog
+    from .dashboard import get_dashboard
+
+    catalog = get_catalog()
+
+    try:
+        data = get_dashboard(catalog)
+
+        if as_json:
+            console.print(json_mod.dumps(data, indent=2, default=str))
+            return
+
+        # Header
+        console.print(Panel("[bold]Lakehouse Dashboard[/bold]", expand=False))
+
+        # Summary
+        console.print(f"\n  Storage: {data['storage_path']}")
+        console.print(f"  Namespaces: {len(data['namespaces'])} ({', '.join(data['namespaces'])})")
+        console.print(f"  Total tables: {data['total_tables']}")
+        console.print(f"  Total size: {data['total_size_display']}")
+
+        # Tables
+        if data["tables"]:
+            console.print()
+            table = Table(show_header=True, header_style="bold cyan")
+            table.add_column("Table")
+            table.add_column("Rows", justify="right")
+            table.add_column("Size", justify="right")
+            table.add_column("Files", justify="right")
+            table.add_column("Health")
+
+            health_icons = {
+                "Good": "[green]● Good[/green]",
+                "Compact": "[yellow]▲ Compact[/yellow]",
+                "Orphans": "[yellow]▲ Orphans[/yellow]",
+                "Stale": "[red]✗ Stale[/red]",
+            }
+
+            for t in data["tables"]:
+                table.add_row(
+                    t["name"],
+                    str(t["rows"]),
+                    t["size_display"],
+                    f"{t['data_files']} files",
+                    health_icons.get(t["health"], t["health"]),
+                )
+            console.print(table)
+
+        # Health legend
+        console.print("\n  [dim]Health indicators:[/dim]")
+        console.print("    [green]● Good[/green] - No maintenance needed")
+        console.print("    [yellow]▲ Compact[/yellow] - >10 data files, compaction recommended")
+        console.print("    [yellow]▲ Orphans[/yellow] - Orphan files detected")
+        console.print("    [red]✗ Stale[/red] - Stats cache is outdated")
+
+        # Recent activity
+        if data["recent_activity"]:
+            console.print(f"\n[bold]Recent Activity (last {len(data['recent_activity'])}):[/bold]")
+            for entry in data["recent_activity"]:
+                ts = entry.get("timestamp", "")[:16]
+                op = entry.get("operation", "").upper()
+                tbl = entry.get("table", "")
+                rows_affected = entry.get("rows_affected", 0)
+                source = entry.get("source", "")
+                row_info = f" ({rows_affected} rows)" if rows_affected else ""
+                console.print(f"  • {ts} {op} {tbl}{row_info} via {source}")
+        else:
+            console.print("\n  [dim]No recent activity[/dim]")
+
+        # Queries info
+        console.print(f"\n  Saved Queries: {data['saved_queries_count']}")
+        console.print(f"  Query History: {data['history_entries_count']} entries")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
 def benchmark(rows: str, output: str):
