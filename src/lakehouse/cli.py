@@ -137,6 +137,74 @@ def snapshots(table_name: str):
 
 
 @main.command()
+@click.argument("table_name")
+@click.option("--from", "from_snapshot", required=True, help="Snapshot ID or ISO timestamp (older)")
+@click.option("--to", "to_snapshot", default=None, help="Snapshot ID or ISO timestamp (newer, default: current)")
+@click.option("--summary", is_flag=True, help="Show summary counts only (no row details)")
+@click.option("--format", "output_format", type=click.Choice(["table", "json"]), default="table", help="Output format")
+@click.option("--max-rows", default=50, help="Maximum rows to display per section")
+def diff(table_name: str, from_snapshot: str, to_snapshot: str, summary: bool, output_format: str, max_rows: int):
+    """Compare two snapshots to see added and deleted rows.
+
+    Examples:
+        lakehouse diff expenses --from 12345 --to 67890
+        lakehouse diff expenses --from 12345
+        lakehouse diff expenses --from 2026-01-01T00:00:00 --summary
+        lakehouse diff expenses --from 12345 --format json
+    """
+    import json as json_mod
+    from .catalog import get_catalog, snapshot_diff
+
+    catalog = get_catalog()
+
+    try:
+        result = snapshot_diff(catalog, table_name, from_snapshot, to_snapshot)
+
+        if output_format == "json":
+            console.print(json_mod.dumps(result, indent=2, default=str))
+            return
+
+        from_id = result["from_snapshot_id"]
+        to_id = result["to_snapshot_id"]
+        console.print(f"\n[bold]Diff for {table_name} (snapshot {from_id} → {to_id}):[/bold]\n")
+
+        s = result["summary"]
+        console.print(f"  [green]Added:[/green]    {s['added']} rows")
+        console.print(f"  [red]Deleted:[/red]  {s['deleted']} rows")
+        console.print(f"  [yellow]Modified:[/yellow] {s['modified']} rows")
+
+        if summary:
+            return
+
+        if result["added"]:
+            console.print(f"\n[bold green]Added rows{f' (showing first {max_rows})' if len(result['added']) > max_rows else ''}:[/bold green]")
+            tbl = Table(show_header=True, header_style="bold green")
+            cols = list(result["added"][0].keys())
+            for col in cols:
+                tbl.add_column(col)
+            for row in result["added"][:max_rows]:
+                tbl.add_row(*[str(v) for v in row.values()])
+            console.print(tbl)
+
+        if result["deleted"]:
+            console.print(f"\n[bold red]Deleted rows{f' (showing first {max_rows})' if len(result['deleted']) > max_rows else ''}:[/bold red]")
+            tbl = Table(show_header=True, header_style="bold red")
+            cols = list(result["deleted"][0].keys())
+            for col in cols:
+                tbl.add_column(col)
+            for row in result["deleted"][:max_rows]:
+                tbl.add_row(*[str(v) for v in row.values()])
+            console.print(tbl)
+
+        if not result["added"] and not result["deleted"] and not result["modified"]:
+            console.print("\n[dim]No changes between these snapshots.[/dim]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command()
 @click.option("--namespace", "-n", default="default", help="Namespace to list tables from (use '*' for all)")
 def tables(namespace: str):
     """List all tables in the lakehouse."""

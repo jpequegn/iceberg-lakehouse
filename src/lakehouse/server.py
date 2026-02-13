@@ -13,7 +13,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans, create_table, get_partitions, get_partition_stats, list_namespaces, create_namespace, drop_namespace, get_namespace_properties
+from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, snapshot_diff, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans, create_table, get_partitions, get_partition_stats, list_namespaces, create_namespace, drop_namespace, get_namespace_properties
 from .query import QueryEngine
 from .queries import save_query, list_saved_queries, get_saved_query, delete_saved_query, add_history_entry, get_history, clear_history
 
@@ -87,6 +87,32 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="snapshot_diff",
+            description=(
+                "Compare two snapshots of a table to see what rows were added or deleted. "
+                "Provide from_snapshot (older) and optionally to_snapshot (newer, defaults to current). "
+                "Use snapshot IDs or ISO timestamps. Use list_snapshots to find available snapshots."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table (e.g., 'expenses')",
+                    },
+                    "from_snapshot": {
+                        "type": "string",
+                        "description": "Older snapshot ID or ISO timestamp",
+                    },
+                    "to_snapshot": {
+                        "type": "string",
+                        "description": "Newer snapshot ID or ISO timestamp (default: current)",
+                    },
+                },
+                "required": ["table_name", "from_snapshot"],
             },
         ),
         Tool(
@@ -965,6 +991,52 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     type="text",
                     text=f"Error: {str(e)}",
                 )]
+
+        elif name == "snapshot_diff":
+            table_name = arguments.get("table_name")
+            from_snap = arguments.get("from_snapshot")
+            if not table_name:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+            if not from_snap:
+                return [TextContent(type="text", text="Error: 'from_snapshot' parameter is required")]
+
+            to_snap = arguments.get("to_snapshot")
+
+            try:
+                catalog = get_catalog()
+                result = snapshot_diff(catalog, table_name, from_snap, to_snap)
+
+                s = result["summary"]
+                lines = [
+                    f"**Diff for `{table_name}` (snapshot {result['from_snapshot_id']} → {result['to_snapshot_id']}):**\n",
+                    f"- **Added:** {s['added']} rows",
+                    f"- **Deleted:** {s['deleted']} rows",
+                    f"- **Modified:** {s['modified']} rows",
+                ]
+
+                if result["added"]:
+                    lines.append(f"\n**Added rows ({s['added']}):**")
+                    cols = list(result["added"][0].keys())
+                    lines.append("| " + " | ".join(cols) + " |")
+                    lines.append("| " + " | ".join("---" for _ in cols) + " |")
+                    for row in result["added"][:50]:
+                        lines.append("| " + " | ".join(str(v) for v in row.values()) + " |")
+
+                if result["deleted"]:
+                    lines.append(f"\n**Deleted rows ({s['deleted']}):**")
+                    cols = list(result["deleted"][0].keys())
+                    lines.append("| " + " | ".join(cols) + " |")
+                    lines.append("| " + " | ".join("---" for _ in cols) + " |")
+                    for row in result["deleted"][:50]:
+                        lines.append("| " + " | ".join(str(v) for v in row.values()) + " |")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Diff error: {str(e)}")]
+
+            except Exception as e:
+                return [TextContent(type="text", text=f"Diff failed: {str(e)}")]
 
         elif name == "list_tables":
             engine = get_engine()
