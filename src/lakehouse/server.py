@@ -17,6 +17,7 @@ from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, up
 from .query import QueryEngine
 from .queries import save_query, list_saved_queries, get_saved_query, delete_saved_query, add_history_entry, get_history, clear_history
 from .validation import add_validation_rule, list_validation_rules, remove_validation_rule, validate_rows
+from .audit import get_audit_log, clear_audit_log
 
 
 # Initialize server
@@ -978,6 +979,48 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["table_name", "rows"],
+            },
+        ),
+        Tool(
+            name="get_audit_log",
+            description=(
+                "Get the audit log of write operations. "
+                "Optionally filter by table name, operation type, or time range."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Filter by table name",
+                    },
+                    "operation": {
+                        "type": "string",
+                        "description": "Filter by operation (insert, update, delete, etc.)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum entries to return (default: 50)",
+                        "default": 50,
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Only entries after this ISO timestamp",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="clear_audit_log",
+            description="Clear audit log entries, optionally only those older than a given duration.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "older_than": {
+                        "type": "string",
+                        "description": "Clear entries older than this (ISO timestamp or duration like '30d', '24h')",
+                    },
+                },
             },
         ),
     ]
@@ -2248,6 +2291,36 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Validate failed: {str(e)}")]
+
+        elif name == "get_audit_log":
+            try:
+                entries = get_audit_log(
+                    table_name=arguments.get("table_name"),
+                    operation=arguments.get("operation"),
+                    limit=arguments.get("limit", 50),
+                    since=arguments.get("since"),
+                )
+                if not entries:
+                    return [TextContent(type="text", text="No audit log entries found.")]
+
+                lines = [f"**Audit log ({len(entries)} entries):**\n"]
+                for e in entries:
+                    details = e.get("details", {})
+                    detail_str = f" | {json.dumps(details)}" if details else ""
+                    lines.append(
+                        f"- {e['timestamp'][:19]} | **{e['operation']}** on `{e['table']}` | "
+                        f"{e['rows_affected']} rows | {e['source']}{detail_str}"
+                    )
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Audit log failed: {str(e)}")]
+
+        elif name == "clear_audit_log":
+            try:
+                result = clear_audit_log(older_than=arguments.get("older_than"))
+                return [TextContent(type="text", text=f"✓ {result['message']}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Clear audit log failed: {str(e)}")]
 
         else:
             return [TextContent(
