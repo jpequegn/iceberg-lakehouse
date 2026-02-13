@@ -16,6 +16,7 @@ from mcp.types import (
 from .catalog import get_catalog, list_tables, get_table_schema, insert_rows, update_rows, delete_rows, upsert_rows, alter_table, get_snapshots, snapshot_diff, rollback_table, expire_snapshots, execute_batch, get_table_property, set_table_property, import_file, export_table, profile_table, compact_table, maintenance_status, cleanup_orphans, create_table, get_partitions, get_partition_stats, list_namespaces, create_namespace, drop_namespace, get_namespace_properties
 from .query import QueryEngine
 from .queries import save_query, list_saved_queries, get_saved_query, delete_saved_query, add_history_entry, get_history, clear_history
+from .validation import add_validation_rule, list_validation_rules, remove_validation_rule, validate_rows
 
 
 # Initialize server
@@ -900,6 +901,83 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        Tool(
+            name="add_validation_rule",
+            description=(
+                "Add a validation rule to a table. Rule types: not_null (column must have value), "
+                "unique (column values must be unique), range (numeric min/max), "
+                "regex (string pattern match), expression (SQL predicate). "
+                "Rules are enforced on insert, update, and upsert operations."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table",
+                    },
+                    "rule": {
+                        "type": "object",
+                        "description": "Rule definition with 'type' and type-specific fields",
+                    },
+                },
+                "required": ["table_name", "rule"],
+            },
+        ),
+        Tool(
+            name="list_validation_rules",
+            description="List all validation rules for a table.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="remove_validation_rule",
+            description="Remove a validation rule by its ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table",
+                    },
+                    "rule_id": {
+                        "type": "string",
+                        "description": "ID of the rule to remove",
+                    },
+                },
+                "required": ["table_name", "rule_id"],
+            },
+        ),
+        Tool(
+            name="validate_data",
+            description=(
+                "Validate rows against a table's validation rules without writing. "
+                "Returns pass/fail with details of which rules failed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table",
+                    },
+                    "rows": {
+                        "type": "array",
+                        "description": "Rows to validate (array of objects)",
+                        "items": {"type": "object"},
+                    },
+                },
+                "required": ["table_name", "rows"],
             },
         ),
     ]
@@ -2096,6 +2174,80 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             except Exception as e:
                 return [TextContent(type="text", text=f"Clear history failed: {str(e)}")]
+
+        elif name == "add_validation_rule":
+            tbl = arguments.get("table_name")
+            rule = arguments.get("rule")
+            if not tbl:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+            if not rule:
+                return [TextContent(type="text", text="Error: 'rule' parameter is required")]
+
+            try:
+                result = add_validation_rule(tbl, rule)
+                return [TextContent(type="text", text=f"✓ {result['message']}")]
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Validation rule error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Add rule failed: {str(e)}")]
+
+        elif name == "list_validation_rules":
+            tbl = arguments.get("table_name")
+            if not tbl:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                rules = list_validation_rules(tbl)
+                if not rules:
+                    return [TextContent(type="text", text=f"No validation rules for `{tbl}`.")]
+
+                lines = [f"**Validation rules for `{tbl}` ({len(rules)}):**\n"]
+                for r in rules:
+                    lines.append(f"- **{r['id']}** | {r['type']} | {json.dumps({k: v for k, v in r.items() if k not in ('id', 'type', 'created_at')})}")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List rules failed: {str(e)}")]
+
+        elif name == "remove_validation_rule":
+            tbl = arguments.get("table_name")
+            rule_id = arguments.get("rule_id")
+            if not tbl:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+            if not rule_id:
+                return [TextContent(type="text", text="Error: 'rule_id' parameter is required")]
+
+            try:
+                result = remove_validation_rule(tbl, rule_id)
+                return [TextContent(type="text", text=f"✓ {result['message']}")]
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Remove rule error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Remove rule failed: {str(e)}")]
+
+        elif name == "validate_data":
+            tbl = arguments.get("table_name")
+            rows = arguments.get("rows")
+            if not tbl:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+            if not rows:
+                return [TextContent(type="text", text="Error: 'rows' parameter is required")]
+
+            try:
+                rules = list_validation_rules(tbl)
+                if not rules:
+                    return [TextContent(type="text", text=f"No validation rules for `{tbl}`. All data passes.")]
+
+                result = validate_rows(rows, rules)
+                if result["valid"]:
+                    return [TextContent(type="text", text=f"✓ All {result['checked']} rows pass validation")]
+
+                lines = [f"**Validation failed** ({len(result['failures'])} issues):\n"]
+                for f in result["failures"]:
+                    lines.append(f"- {f['message']}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Validate failed: {str(e)}")]
 
         else:
             return [TextContent(

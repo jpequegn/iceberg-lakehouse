@@ -599,6 +599,26 @@ def insert_rows(
         except Exception as e:
             raise ValueError(f"Error converting column '{field.name}': {e}")
 
+    # Validate rows before writing
+    from .validation import list_validation_rules, validate_rows, ValidationError
+    rules = list_validation_rules(table_name)
+    if rules:
+        # For unique checks, load existing data
+        existing_data = None
+        if any(r["type"] == "unique" for r in rules):
+            try:
+                existing_arrow = table.scan().to_arrow()
+                existing_data = existing_arrow.to_pydict()
+                existing_data = [
+                    {k: existing_data[k][i] for k in existing_data}
+                    for i in range(existing_arrow.num_rows)
+                ]
+            except Exception:
+                existing_data = None
+        result = validate_rows(rows, rules, existing_data)
+        if not result["valid"]:
+            raise ValidationError(result["failures"])
+
     # Create Arrow table and append
     arrow_table = pa.table(arrow_arrays)
     table.append(arrow_table)
@@ -705,6 +725,28 @@ def update_rows(
 
     # Execute and get updated table
     updated_arrow = conn.execute(select_sql).fetch_arrow_table()
+
+    # Validate the updated rows before writing
+    from .validation import list_validation_rules, validate_rows, ValidationError
+    rules = list_validation_rules(table_name)
+    if rules:
+        # Extract the rows that were updated (matching the filter)
+        matched_arrow = conn.execute(f"SELECT * FROM source_table WHERE {filter_expr}").fetch_arrow_table()
+        # Build updated versions of matched rows
+        updated_matched = conn.execute(
+            f"SELECT {', '.join(select_parts)} FROM source_table WHERE {filter_expr}"
+        ).fetch_arrow_table()
+        updated_dicts = updated_matched.to_pydict()
+        updated_rows = [
+            {k: updated_dicts[k][i] for k in updated_dicts}
+            for i in range(updated_matched.num_rows)
+        ]
+        if updated_rows:
+            result = validate_rows(updated_rows, [r for r in rules if r["type"] != "unique"])
+            if not result["valid"]:
+                conn.close()
+                raise ValidationError(result["failures"])
+
     conn.close()
 
     # Overwrite the table with updated data
@@ -1260,6 +1302,14 @@ def upsert_rows(
 
     merged_arrow = conn.execute(merged_sql).fetch_arrow_table()
     conn.close()
+
+    # Validate all incoming rows before writing
+    from .validation import list_validation_rules, validate_rows, ValidationError
+    rules = list_validation_rules(table_name)
+    if rules:
+        result = validate_rows(rows, [r for r in rules if r["type"] != "unique"])
+        if not result["valid"]:
+            raise ValidationError(result["failures"])
 
     # Overwrite the table with merged data
     table.overwrite(merged_arrow)
