@@ -288,6 +288,120 @@ def scan_as_of(
         raise ValueError(f"Invalid as_of value '{as_of}': must be ISO timestamp or snapshot ID. {e}")
 
 
+def snapshot_diff(
+    catalog: Catalog,
+    table_name: str,
+    from_snapshot: str,
+    to_snapshot: str | None = None,
+) -> dict:
+    """Compare two snapshots and return added, modified, and deleted rows.
+
+    Args:
+        catalog: The Iceberg catalog
+        table_name: Name of the table (with or without namespace)
+        from_snapshot: Snapshot ID or ISO timestamp (older)
+        to_snapshot: Snapshot ID or ISO timestamp (newer, default: current)
+
+    Returns:
+        Dict with keys: added, deleted, modified, summary, from_snapshot_id, to_snapshot_id
+    """
+    import duckdb
+
+    if "." not in table_name:
+        table_name = f"default.{table_name}"
+
+    try:
+        table = catalog.load_table(table_name)
+    except Exception as e:
+        raise ValueError(f"Table '{table_name}' not found: {e}")
+
+    # Resolve from_snapshot
+    from_arrow = scan_as_of(catalog, table_name, from_snapshot)
+    from_snapshot_id = _resolve_snapshot_id(table, from_snapshot)
+
+    # Resolve to_snapshot (default: current)
+    if to_snapshot is not None:
+        to_arrow = scan_as_of(catalog, table_name, to_snapshot)
+        to_snapshot_id = _resolve_snapshot_id(table, to_snapshot)
+    else:
+        to_arrow = table.scan().to_arrow()
+        current = table.current_snapshot()
+        to_snapshot_id = current.snapshot_id if current else None
+
+    if from_snapshot_id == to_snapshot_id:
+        return {
+            "added": [],
+            "deleted": [],
+            "modified": [],
+            "summary": {"added": 0, "deleted": 0, "modified": 0},
+            "from_snapshot_id": from_snapshot_id,
+            "to_snapshot_id": to_snapshot_id,
+        }
+
+    conn = duckdb.connect()
+    conn.register("from_tbl", from_arrow)
+    conn.register("to_tbl", to_arrow)
+
+    columns = [field.name for field in from_arrow.schema]
+    col_list = ", ".join(f'"{c}"' for c in columns)
+
+    # Rows in to but not in from = added
+    added_result = conn.execute(
+        f"SELECT {col_list} FROM to_tbl EXCEPT SELECT {col_list} FROM from_tbl"
+    ).fetchall()
+
+    # Rows in from but not in to = deleted
+    deleted_result = conn.execute(
+        f"SELECT {col_list} FROM from_tbl EXCEPT SELECT {col_list} FROM to_tbl"
+    ).fetchall()
+
+    added_rows = [dict(zip(columns, row)) for row in added_result]
+    deleted_rows = [dict(zip(columns, row)) for row in deleted_result]
+
+    conn.close()
+
+    return {
+        "added": added_rows,
+        "deleted": deleted_rows,
+        "modified": [],
+        "summary": {
+            "added": len(added_rows),
+            "deleted": len(deleted_rows),
+            "modified": 0,
+        },
+        "from_snapshot_id": from_snapshot_id,
+        "to_snapshot_id": to_snapshot_id,
+    }
+
+
+def _resolve_snapshot_id(table, ref: str) -> int:
+    """Resolve a snapshot reference (ID or timestamp) to a snapshot ID."""
+    import datetime
+
+    # Try as integer snapshot ID
+    try:
+        sid = int(ref)
+        snapshot = table.snapshot_by_id(sid)
+        if snapshot is not None:
+            return sid
+    except (ValueError, TypeError):
+        pass
+
+    # Try as ISO timestamp
+    try:
+        ts = datetime.datetime.fromisoformat(ref)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        timestamp_ms = int(ts.timestamp() * 1000)
+        snapshot = table.snapshot_as_of_timestamp(timestamp_ms)
+        if snapshot is not None:
+            return snapshot.snapshot_id
+    except (ValueError, TypeError):
+        pass
+
+    raise ValueError(f"Cannot resolve snapshot reference: {ref}")
+
+
 def get_table_schema(catalog: Catalog, table_name: str) -> dict:
     """Get schema information for a table."""
     if "." not in table_name:
