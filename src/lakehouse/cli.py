@@ -1922,6 +1922,175 @@ def dashboard(as_json: bool):
         raise click.Abort()
 
 
+@main.group("maintain")
+def maintain_group():
+    """Manage maintenance policies for tables.
+
+    Examples:
+        lakehouse maintain set expenses --compact-threshold 10
+        lakehouse maintain show expenses
+        lakehouse maintain remove expenses
+        lakehouse maintain run expenses
+        lakehouse maintain run --all --dry-run
+        lakehouse maintain check expenses
+    """
+    pass
+
+
+@maintain_group.command("set")
+@click.argument("table_name")
+@click.option("--compact-threshold", type=int, default=None, help="Compact when data files >= this (default: 10)")
+@click.option("--retain-last", type=int, default=None, help="Keep at least N snapshots (default: 5)")
+@click.option("--expire-older-than", default=None, help="Expire snapshots older than this (e.g. '30d')")
+@click.option("--no-cleanup", is_flag=True, help="Disable auto orphan cleanup")
+def maintain_set(table_name: str, compact_threshold: int, retain_last: int, expire_older_than: str, no_cleanup: bool):
+    """Set maintenance policy for a table."""
+    from .maintenance import set_maintenance_policy
+
+    policy = {}
+    if compact_threshold is not None:
+        policy["auto_compact_threshold"] = compact_threshold
+    if retain_last is not None:
+        policy["auto_expire_retain_last"] = retain_last
+    if expire_older_than is not None:
+        policy["auto_expire_older_than"] = expire_older_than
+    if no_cleanup:
+        policy["auto_cleanup_orphans"] = False
+
+    result = set_maintenance_policy(table_name, policy)
+    console.print(f"[bold green]✓ {result['message']}[/bold green]")
+
+    p = result["policy"]
+    console.print(f"  Compact threshold: {p['auto_compact_threshold']} files")
+    console.print(f"  Retain last: {p['auto_expire_retain_last']} snapshots")
+    console.print(f"  Expire older than: {p.get('auto_expire_older_than') or 'not set'}")
+    console.print(f"  Auto cleanup orphans: {p['auto_cleanup_orphans']}")
+
+
+@maintain_group.command("show")
+@click.argument("table_name")
+def maintain_show(table_name: str):
+    """Show maintenance policy for a table."""
+    from .maintenance import get_maintenance_policy
+
+    policy = get_maintenance_policy(table_name)
+    if policy is None:
+        console.print(f"[yellow]No maintenance policy for {table_name}[/yellow]")
+        return
+
+    full_name = table_name if "." in table_name else f"default.{table_name}"
+    console.print(f"[bold]Maintenance policy for {full_name}:[/bold]\n")
+    console.print(f"  Compact threshold: {policy['auto_compact_threshold']} files")
+    console.print(f"  Retain last: {policy['auto_expire_retain_last']} snapshots")
+    console.print(f"  Expire older than: {policy.get('auto_expire_older_than') or 'not set'}")
+    console.print(f"  Auto cleanup orphans: {policy['auto_cleanup_orphans']}")
+    console.print(f"  Created: {policy.get('created_at', 'N/A')}")
+    console.print(f"  Last run: {policy.get('last_run') or 'never'}")
+
+
+@maintain_group.command("remove")
+@click.argument("table_name")
+def maintain_remove(table_name: str):
+    """Remove maintenance policy for a table."""
+    from .maintenance import remove_maintenance_policy
+
+    result = remove_maintenance_policy(table_name)
+    console.print(f"[bold green]✓ {result['message']}[/bold green]")
+
+
+@maintain_group.command("run")
+@click.argument("table_name", required=False)
+@click.option("--all", "run_all", is_flag=True, help="Run maintenance for all tables with policies")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without making changes")
+def maintain_run(table_name: str, run_all: bool, dry_run: bool):
+    """Run maintenance for a table or all tables with policies."""
+    from .catalog import get_catalog
+    from .maintenance import run_maintenance
+
+    if not table_name and not run_all:
+        console.print("[bold red]Error:[/bold red] Provide a table name or use --all")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        actions = run_maintenance(
+            catalog,
+            table_name=table_name if not run_all else None,
+            dry_run=dry_run,
+        )
+
+        if not actions:
+            console.print("[green]No maintenance actions needed.[/green]")
+            return
+
+        mode = "[yellow](dry run)[/yellow] " if dry_run else ""
+        console.print(f"{mode}[bold]Maintenance actions ({len(actions)}):[/bold]\n")
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Table")
+        table.add_column("Action")
+        table.add_column("Status")
+        table.add_column("Detail")
+
+        status_colors = {"completed": "green", "dry_run": "yellow", "failed": "red"}
+
+        for a in actions:
+            color = status_colors.get(a["status"], "white")
+            table.add_row(
+                a["table"],
+                a["action"],
+                f"[{color}]{a['status']}[/{color}]",
+                a["detail"],
+            )
+        console.print(table)
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@maintain_group.command("check")
+@click.argument("table_name", required=False)
+@click.option("--all", "check_all", is_flag=True, help="Check all tables with policies")
+def maintain_check(table_name: str, check_all: bool):
+    """Check if a table needs maintenance."""
+    from .catalog import get_catalog
+    from .maintenance import check_maintenance_needed, _load_store
+
+    if not table_name and not check_all:
+        console.print("[bold red]Error:[/bold red] Provide a table name or use --all")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        if check_all:
+            store = _load_store()
+            tables = list(store.keys())
+        else:
+            tables = [table_name]
+
+        for tbl in tables:
+            check = check_maintenance_needed(catalog, tbl)
+            name = check["table"]
+
+            if not check["has_policy"]:
+                console.print(f"[yellow]{name}: no policy[/yellow]")
+                continue
+
+            if check["actions_needed"]:
+                console.print(f"[bold]{name}:[/bold] {check['message']}")
+                for action in check["actions_needed"]:
+                    console.print(f"  • {action}")
+            else:
+                console.print(f"[green]{name}: {check['message']}[/green]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

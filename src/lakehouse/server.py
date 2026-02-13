@@ -20,6 +20,7 @@ from .validation import add_validation_rule, list_validation_rules, remove_valid
 from .audit import get_audit_log, clear_audit_log
 from .stats import compute_table_stats, get_cached_stats, get_all_cached_stats, refresh_stats, is_stats_stale
 from .dashboard import get_dashboard
+from .maintenance import set_maintenance_policy, get_maintenance_policy, remove_maintenance_policy, run_maintenance, check_maintenance_needed
 
 
 # Initialize server
@@ -1069,6 +1070,49 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        Tool(
+            name="set_maintenance_policy",
+            description="Set a maintenance policy for a table (auto-compact, auto-expire, orphan cleanup).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "policy": {
+                        "type": "object",
+                        "description": "Policy settings",
+                        "properties": {
+                            "auto_compact_threshold": {"type": "integer", "description": "Compact when files >= this (default: 10)"},
+                            "auto_expire_retain_last": {"type": "integer", "description": "Keep at least N snapshots (default: 5)"},
+                            "auto_expire_older_than": {"type": "string", "description": "Expire snapshots older than this (e.g. '30d')"},
+                            "auto_cleanup_orphans": {"type": "boolean", "description": "Cleanup orphans after maintenance (default: true)"},
+                        },
+                    },
+                },
+                "required": ["table_name", "policy"],
+            },
+        ),
+        Tool(
+            name="run_maintenance",
+            description="Run maintenance for a table or all tables with policies. Checks compact threshold, snapshot expiration, and orphan cleanup.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table to maintain (omit for all tables with policies)"},
+                    "dry_run": {"type": "boolean", "description": "If true, report what would happen without making changes", "default": False},
+                },
+            },
+        ),
+        Tool(
+            name="check_maintenance",
+            description="Check if a table needs maintenance based on its policy.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table to check"},
+                },
+                "required": ["table_name"],
             },
         ),
     ]
@@ -2440,6 +2484,66 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get all stats failed: {str(e)}")]
+
+        elif name == "set_maintenance_policy":
+            try:
+                tbl = arguments.get("table_name")
+                policy = arguments.get("policy", {})
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+                result = set_maintenance_policy(tbl, policy)
+                p = result["policy"]
+                lines = [
+                    f"**{result['message']}**\n",
+                    f"- Compact threshold: {p['auto_compact_threshold']} files",
+                    f"- Retain last: {p['auto_expire_retain_last']} snapshots",
+                    f"- Expire older than: {p.get('auto_expire_older_than') or 'not set'}",
+                    f"- Auto cleanup orphans: {p['auto_cleanup_orphans']}",
+                ]
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Set policy failed: {str(e)}")]
+
+        elif name == "run_maintenance":
+            try:
+                tbl = arguments.get("table_name")
+                dry_run = arguments.get("dry_run", False)
+                catalog = get_catalog()
+                actions = run_maintenance(catalog, table_name=tbl, dry_run=dry_run)
+
+                if not actions:
+                    return [TextContent(type="text", text="No maintenance actions needed.")]
+
+                mode = "(dry run) " if dry_run else ""
+                lines = [f"**{mode}Maintenance actions ({len(actions)}):**\n"]
+                for a in actions:
+                    lines.append(f"- **{a['table']}** → {a['action']}: {a['detail']} [{a['status']}]")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Run maintenance failed: {str(e)}")]
+
+        elif name == "check_maintenance":
+            try:
+                tbl = arguments.get("table_name")
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+                catalog = get_catalog()
+                check = check_maintenance_needed(catalog, tbl)
+
+                if not check["has_policy"]:
+                    return [TextContent(type="text", text=f"No maintenance policy for {check['table']}")]
+
+                lines = [f"**{check['table']}**: {check['message']}\n"]
+                lines.append(f"- Data files: {check['data_files']}")
+                lines.append(f"- Snapshots: {check['snapshots']}")
+                lines.append(f"- Orphan files: {check['orphan_files']}")
+                if check["actions_needed"]:
+                    lines.append("\n**Actions needed:**")
+                    for action in check["actions_needed"]:
+                        lines.append(f"- {action}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Check maintenance failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
