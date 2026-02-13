@@ -1322,6 +1322,187 @@ def partition_stats_cmd(table_name: str):
         raise click.Abort()
 
 
+@main.group()
+@click.argument("table_name")
+@click.pass_context
+def validate(ctx, table_name: str):
+    """Manage validation rules for a table."""
+    ctx.ensure_object(dict)
+    ctx.obj["table_name"] = table_name
+
+
+@validate.command("add")
+@click.argument("rule_type", type=click.Choice(["not_null", "unique", "range", "regex", "expression"]))
+@click.option("--column", "-c", help="Column name (for not_null, range, regex)")
+@click.option("--columns", help="Comma-separated column names (for unique)")
+@click.option("--min", "min_val", type=float, help="Minimum value (for range)")
+@click.option("--max", "max_val", type=float, help="Maximum value (for range)")
+@click.option("--pattern", "-p", help="Regex pattern (for regex)")
+@click.option("--sql", "sql_expr", help="SQL expression (for expression)")
+@click.pass_context
+def validate_add(ctx, rule_type: str, column: str, columns: str, min_val: float, max_val: float, pattern: str, sql_expr: str):
+    """Add a validation rule.
+
+    Examples:
+        lakehouse validate expenses add not_null --column id
+        lakehouse validate expenses add range --column amount --min 0 --max 100000
+        lakehouse validate expenses add regex --column category --pattern "^[a-z_]+$"
+        lakehouse validate expenses add expression --sql "amount > 0"
+        lakehouse validate expenses add unique --columns id
+    """
+    from .validation import add_validation_rule
+
+    table_name = ctx.obj["table_name"]
+
+    rule = {"type": rule_type}
+    if rule_type == "not_null":
+        if not column:
+            console.print("[bold red]Error:[/bold red] --column is required for not_null")
+            raise click.Abort()
+        rule["column"] = column
+    elif rule_type == "unique":
+        if not columns:
+            console.print("[bold red]Error:[/bold red] --columns is required for unique")
+            raise click.Abort()
+        rule["columns"] = [c.strip() for c in columns.split(",")]
+    elif rule_type == "range":
+        if not column:
+            console.print("[bold red]Error:[/bold red] --column is required for range")
+            raise click.Abort()
+        rule["column"] = column
+        if min_val is not None:
+            rule["min"] = min_val
+        if max_val is not None:
+            rule["max"] = max_val
+    elif rule_type == "regex":
+        if not column or not pattern:
+            console.print("[bold red]Error:[/bold red] --column and --pattern are required for regex")
+            raise click.Abort()
+        rule["column"] = column
+        rule["pattern"] = pattern
+    elif rule_type == "expression":
+        if not sql_expr:
+            console.print("[bold red]Error:[/bold red] --sql is required for expression")
+            raise click.Abort()
+        rule["sql"] = sql_expr
+
+    try:
+        result = add_validation_rule(table_name, rule)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@validate.command("list")
+@click.pass_context
+def validate_list(ctx):
+    """List all validation rules for a table."""
+    from .validation import list_validation_rules
+
+    table_name = ctx.obj["table_name"]
+    rules = list_validation_rules(table_name)
+
+    if not rules:
+        console.print(f"[yellow]No validation rules for {table_name}.[/yellow]")
+        return
+
+    console.print(f"[bold]Validation rules for {table_name} ({len(rules)}):[/bold]\n")
+    tbl = Table(show_header=True, header_style="bold cyan")
+    tbl.add_column("ID")
+    tbl.add_column("Type")
+    tbl.add_column("Details")
+    tbl.add_column("Created")
+
+    for rule in rules:
+        details = _format_rule_details(rule)
+        tbl.add_row(
+            rule["id"],
+            rule["type"],
+            details,
+            rule.get("created_at", "")[:19],
+        )
+
+    console.print(tbl)
+
+
+@validate.command("remove")
+@click.argument("rule_id")
+@click.pass_context
+def validate_remove(ctx, rule_id: str):
+    """Remove a validation rule by ID."""
+    from .validation import remove_validation_rule
+
+    table_name = ctx.obj["table_name"]
+
+    try:
+        result = remove_validation_rule(table_name, rule_id)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@validate.command("check")
+@click.argument("json_data")
+@click.pass_context
+def validate_check(ctx, json_data: str):
+    """Validate data against rules (dry run).
+
+    Examples:
+        lakehouse validate expenses check '[{"id": 1, "amount": -5}]'
+    """
+    import json as json_mod
+    from .validation import list_validation_rules, validate_rows
+
+    table_name = ctx.obj["table_name"]
+
+    try:
+        rows = json_mod.loads(json_data)
+    except json_mod.JSONDecodeError as e:
+        console.print(f"[bold red]Error:[/bold red] Invalid JSON: {e}")
+        raise click.Abort()
+
+    if not isinstance(rows, list):
+        console.print("[bold red]Error:[/bold red] JSON data must be an array of objects")
+        raise click.Abort()
+
+    rules = list_validation_rules(table_name)
+    if not rules:
+        console.print(f"[yellow]No validation rules for {table_name}. All data passes.[/yellow]")
+        return
+
+    result = validate_rows(rows, rules)
+
+    if result["valid"]:
+        console.print(f"[bold green]✓ All {result['checked']} rows pass validation[/bold green]")
+    else:
+        console.print(f"[bold red]✗ Validation failed ({len(result['failures'])} issues):[/bold red]\n")
+        for f in result["failures"]:
+            console.print(f"  [red]•[/red] {f['message']}")
+
+
+def _format_rule_details(rule: dict) -> str:
+    """Format rule details for display."""
+    rule_type = rule["type"]
+    if rule_type == "not_null":
+        return f"column: {rule['column']}"
+    elif rule_type == "unique":
+        return f"columns: {', '.join(rule['columns'])}"
+    elif rule_type == "range":
+        parts = []
+        if "min" in rule:
+            parts.append(f"min={rule['min']}")
+        if "max" in rule:
+            parts.append(f"max={rule['max']}")
+        return f"column: {rule['column']}, {', '.join(parts)}"
+    elif rule_type == "regex":
+        return f"column: {rule['column']}, pattern: {rule['pattern']}"
+    elif rule_type == "expression":
+        return f"sql: {rule['sql']}"
+    return ""
+
+
 @main.command("query-save")
 @click.argument("name")
 @click.argument("sql")
