@@ -2091,6 +2091,140 @@ def maintain_check(table_name: str, check_all: bool):
         raise click.Abort()
 
 
+@main.group("view")
+def view_group():
+    """Manage SQL views (named virtual tables).
+
+    Examples:
+        lakehouse view create recent_expenses "SELECT * FROM expenses WHERE date >= '2026-01-01'"
+        lakehouse view list
+        lakehouse view query recent_expenses
+        lakehouse view drop recent_expenses
+    """
+    pass
+
+
+@view_group.command("create")
+@click.argument("name")
+@click.argument("sql")
+@click.option("--description", "-d", default="", help="Description for the view")
+def view_create(name: str, sql: str, description: str):
+    """Create a named SQL view."""
+    from .views import create_view
+
+    try:
+        result = create_view(name, sql, description=description)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+        console.print(f"  SQL: {result['sql']}")
+        if result["description"]:
+            console.print(f"  Description: {result['description']}")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@view_group.command("list")
+def view_list():
+    """List all SQL views."""
+    from .views import list_views
+
+    views = list_views()
+    if not views:
+        console.print("[yellow]No views defined.[/yellow]")
+        return
+
+    console.print(f"[bold]Views ({len(views)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Name")
+    table.add_column("SQL")
+    table.add_column("Description")
+    table.add_column("Created")
+
+    for v in views:
+        sql_preview = v["sql"]
+        if len(sql_preview) > 60:
+            sql_preview = sql_preview[:57] + "..."
+        table.add_row(
+            v["name"],
+            sql_preview,
+            v.get("description", ""),
+            v.get("created_at", "")[:19],
+        )
+    console.print(table)
+
+
+@view_group.command("show")
+@click.argument("name")
+def view_show(name: str):
+    """Show a view definition."""
+    from .views import get_view
+
+    try:
+        v = get_view(name)
+        console.print(f"[bold]View: {v['name']}[/bold]\n")
+        console.print(f"  SQL: {v['sql']}")
+        if v["description"]:
+            console.print(f"  Description: {v['description']}")
+        console.print(f"  Created: {v.get('created_at', 'N/A')}")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@view_group.command("query")
+@click.argument("name")
+@click.option("--max-rows", default=100, help="Maximum rows to return")
+@click.option("--format", "output_format", type=click.Choice(["table", "csv", "json"]), default="table")
+def view_query(name: str, max_rows: int, output_format: str):
+    """Query a SQL view."""
+    from .views import query_view
+    from .query import QueryEngine
+
+    engine = QueryEngine()
+
+    try:
+        result = query_view(name, engine, max_rows=max_rows)
+
+        if result.empty:
+            console.print("[yellow]View returned no results.[/yellow]")
+            return
+
+        if output_format == "table":
+            table = Table(show_header=True, header_style="bold magenta")
+            for col in result.columns:
+                table.add_column(str(col))
+            for _, row in result.iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+        elif output_format == "csv":
+            print(result.to_csv(index=False))
+        elif output_format == "json":
+            print(result.to_json(orient="records", indent=2))
+
+        console.print(f"\n[dim]({len(result)} rows)[/dim]")
+
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Query error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@view_group.command("drop")
+@click.argument("name")
+def view_drop(name: str):
+    """Drop a SQL view."""
+    from .views import drop_view
+
+    try:
+        result = drop_view(name)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

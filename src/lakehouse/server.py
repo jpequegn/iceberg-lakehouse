@@ -21,6 +21,7 @@ from .audit import get_audit_log, clear_audit_log
 from .stats import compute_table_stats, get_cached_stats, get_all_cached_stats, refresh_stats, is_stats_stale
 from .dashboard import get_dashboard
 from .maintenance import set_maintenance_policy, get_maintenance_policy, remove_maintenance_policy, run_maintenance, check_maintenance_needed
+from .views import create_view, list_views, get_view, drop_view, query_view
 
 
 # Initialize server
@@ -1113,6 +1114,50 @@ async def list_tools() -> list[Tool]:
                     "table_name": {"type": "string", "description": "Table to check"},
                 },
                 "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="create_view",
+            description="Create a named SQL view (virtual table). Views store SQL definitions and are resolved at query time.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "View name (e.g. 'recent_expenses')"},
+                    "sql": {"type": "string", "description": "SQL SELECT query defining the view"},
+                    "description": {"type": "string", "description": "Optional description"},
+                },
+                "required": ["name", "sql"],
+            },
+        ),
+        Tool(
+            name="list_views",
+            description="List all SQL views with their names, SQL definitions, and descriptions.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="query_view",
+            description="Execute a SQL view and return results.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "View name to query"},
+                    "max_rows": {"type": "integer", "description": "Maximum rows to return (default: 1000)", "default": 1000},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="drop_view",
+            description="Drop a SQL view by name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "View name to drop"},
+                },
+                "required": ["name"],
             },
         ),
     ]
@@ -2544,6 +2589,61 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Check maintenance failed: {str(e)}")]
+
+        elif name == "create_view":
+            try:
+                view_name = arguments.get("name")
+                view_sql = arguments.get("sql")
+                view_desc = arguments.get("description", "")
+                if not view_name or not view_sql:
+                    return [TextContent(type="text", text="Error: 'name' and 'sql' are required")]
+                result = create_view(view_name, view_sql, description=view_desc)
+                return [TextContent(type="text", text=f"**{result['message']}**\n\nSQL: `{result['sql']}`")]
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Create view failed: {str(e)}")]
+
+        elif name == "list_views":
+            try:
+                views = list_views()
+                if not views:
+                    return [TextContent(type="text", text="No views defined.")]
+                lines = [f"**Views ({len(views)}):**\n"]
+                for v in views:
+                    desc = f" — {v['description']}" if v.get("description") else ""
+                    lines.append(f"- **{v['name']}**: `{v['sql']}`{desc}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List views failed: {str(e)}")]
+
+        elif name == "query_view":
+            try:
+                view_name = arguments.get("name")
+                max_rows = arguments.get("max_rows", 1000)
+                if not view_name:
+                    return [TextContent(type="text", text="Error: 'name' is required")]
+                engine = get_engine()
+                df = query_view(view_name, engine, max_rows=max_rows)
+                if df.empty:
+                    return [TextContent(type="text", text="View returned no results.")]
+                return [TextContent(type="text", text=df.to_markdown(index=False))]
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Query view failed: {str(e)}")]
+
+        elif name == "drop_view":
+            try:
+                view_name = arguments.get("name")
+                if not view_name:
+                    return [TextContent(type="text", text="Error: 'name' is required")]
+                result = drop_view(view_name)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Drop view failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
