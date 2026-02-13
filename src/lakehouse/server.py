@@ -19,6 +19,7 @@ from .queries import save_query, list_saved_queries, get_saved_query, delete_sav
 from .validation import add_validation_rule, list_validation_rules, remove_validation_rule, validate_rows
 from .audit import get_audit_log, clear_audit_log
 from .stats import compute_table_stats, get_cached_stats, get_all_cached_stats, refresh_stats, is_stats_stale
+from .dashboard import get_dashboard
 
 
 # Initialize server
@@ -1057,6 +1058,14 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_all_stats",
             description="Get cached statistics for all tables in the lakehouse.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="dashboard",
+            description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -2431,6 +2440,47 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get all stats failed: {str(e)}")]
+
+        elif name == "dashboard":
+            try:
+                catalog = get_catalog()
+                data = get_dashboard(catalog)
+
+                lines = [
+                    "# Lakehouse Dashboard\n",
+                    f"**Storage:** {data['storage_path']}",
+                    f"**Namespaces:** {len(data['namespaces'])} ({', '.join(data['namespaces'])})",
+                    f"**Total tables:** {data['total_tables']}",
+                    f"**Total size:** {data['total_size_display']}\n",
+                ]
+
+                if data["tables"]:
+                    lines.append("## Tables\n")
+                    lines.append("| Table | Rows | Size | Files | Health |")
+                    lines.append("|-------|------|------|-------|--------|")
+                    for t in data["tables"]:
+                        lines.append(
+                            f"| {t['name']} | {t['rows']} | {t['size_display']} | "
+                            f"{t['data_files']} | {t['health']} |"
+                        )
+
+                if data["recent_activity"]:
+                    lines.append(f"\n## Recent Activity (last {len(data['recent_activity'])})\n")
+                    for entry in data["recent_activity"]:
+                        ts = entry.get("timestamp", "")[:16]
+                        op = entry.get("operation", "").upper()
+                        tbl = entry.get("table", "")
+                        rows_affected = entry.get("rows_affected", 0)
+                        source = entry.get("source", "")
+                        row_info = f" ({rows_affected} rows)" if rows_affected else ""
+                        lines.append(f"- {ts} {op} {tbl}{row_info} via {source}")
+
+                lines.append(f"\n**Saved Queries:** {data['saved_queries_count']}")
+                lines.append(f"**Query History:** {data['history_entries_count']} entries")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Dashboard failed: {str(e)}")]
 
         else:
             return [TextContent(
