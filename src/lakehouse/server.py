@@ -18,6 +18,7 @@ from .query import QueryEngine
 from .queries import save_query, list_saved_queries, get_saved_query, delete_saved_query, add_history_entry, get_history, clear_history
 from .validation import add_validation_rule, list_validation_rules, remove_validation_rule, validate_rows
 from .audit import get_audit_log, clear_audit_log
+from .stats import compute_table_stats, get_cached_stats, get_all_cached_stats, refresh_stats, is_stats_stale
 
 
 # Initialize server
@@ -1021,6 +1022,44 @@ async def list_tools() -> list[Tool]:
                         "description": "Clear entries older than this (ISO timestamp or duration like '30d', '24h')",
                     },
                 },
+            },
+        ),
+        Tool(
+            name="get_table_stats",
+            description=(
+                "Get cached statistics for a table including row count, column stats, "
+                "size, snapshots. Auto-refreshes if stale. Fast response for LLM queries."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table",
+                    },
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="refresh_table_stats",
+            description="Refresh cached statistics for a table or all tables.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table to refresh (omit for all tables)",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_all_stats",
+            description="Get cached statistics for all tables in the lakehouse.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
             },
         ),
     ]
@@ -2321,6 +2360,77 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"✓ {result['message']}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Clear audit log failed: {str(e)}")]
+
+        elif name == "get_table_stats":
+            tbl = arguments.get("table_name")
+            if not tbl:
+                return [TextContent(type="text", text="Error: 'table_name' parameter is required")]
+
+            try:
+                catalog = get_catalog()
+                # Auto-refresh if stale
+                if is_stats_stale(tbl, catalog):
+                    stats = compute_table_stats(catalog, tbl)
+                else:
+                    stats = get_cached_stats(tbl)
+
+                if not stats:
+                    return [TextContent(type="text", text=f"No stats for `{tbl}`. Use refresh_table_stats first.")]
+
+                lines = [
+                    f"**Stats for `{tbl}`:**\n",
+                    f"- **Rows:** {stats['row_count']}",
+                    f"- **Columns:** {stats['column_count']}",
+                    f"- **Data files:** {stats['data_files']}",
+                    f"- **Size:** {stats['size_bytes']} bytes",
+                    f"- **Snapshots:** {stats['snapshot_count']}",
+                    f"- **Last modified:** {stats.get('last_modified', 'N/A')}",
+                ]
+                if stats.get("columns"):
+                    lines.append("\n**Column stats:**")
+                    for col, info in stats["columns"].items():
+                        parts = [f"type={info['type']}"]
+                        if "min" in info:
+                            parts.append(f"min={info['min']}")
+                        if "max" in info:
+                            parts.append(f"max={info['max']}")
+                        if "unique" in info:
+                            parts.append(f"unique={info['unique']}")
+                        if "nulls" in info:
+                            parts.append(f"nulls={info['nulls']}")
+                        lines.append(f"- **{col}**: {', '.join(parts)}")
+
+                return [TextContent(type="text", text="\n".join(lines))]
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Stats error: {str(e)}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Stats failed: {str(e)}")]
+
+        elif name == "refresh_table_stats":
+            try:
+                catalog = get_catalog()
+                tbl = arguments.get("table_name")
+                result = refresh_stats(catalog, table_name=tbl)
+                return [TextContent(type="text", text=f"✓ {result['message']}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Refresh stats failed: {str(e)}")]
+
+        elif name == "get_all_stats":
+            try:
+                all_stats = get_all_cached_stats()
+                if not all_stats:
+                    return [TextContent(type="text", text="No cached stats. Use refresh_table_stats to compute.")]
+
+                lines = [f"**Cached stats for {len(all_stats)} table(s):**\n"]
+                for tbl, s in all_stats.items():
+                    lines.append(
+                        f"- **{tbl}**: {s['row_count']} rows, {s['column_count']} cols, "
+                        f"{s['data_files']} files, {s['size_bytes']} bytes, "
+                        f"{s['snapshot_count']} snapshots"
+                    )
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get all stats failed: {str(e)}")]
 
         else:
             return [TextContent(

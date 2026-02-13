@@ -1562,6 +1562,110 @@ def audit_cmd(table_name: str, operation: str, limit: int, since: str, clear_fla
     console.print(tbl)
 
 
+@main.command("stats")
+@click.argument("table_name", required=False)
+@click.option("--all", "show_all", is_flag=True, help="Show stats for all tables")
+@click.option("--refresh", is_flag=True, help="Refresh stats before showing")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def stats_cmd(table_name: str, show_all: bool, refresh: bool, as_json: bool):
+    """Show or refresh cached table statistics.
+
+    Examples:
+        lakehouse stats expenses
+        lakehouse stats --all
+        lakehouse stats expenses --refresh
+        lakehouse stats --all --refresh
+        lakehouse stats expenses --json
+    """
+    import json as json_mod
+    from .catalog import get_catalog
+    from .stats import compute_table_stats, get_cached_stats, get_all_cached_stats, refresh_stats, is_stats_stale
+
+    if not table_name and not show_all:
+        console.print("[bold red]Error:[/bold red] Provide a table name or use --all")
+        raise click.Abort()
+
+    catalog = get_catalog()
+
+    try:
+        if show_all:
+            if refresh:
+                result = refresh_stats(catalog)
+                console.print(f"[bold green]✓ {result['message']}[/bold green]\n")
+
+            all_stats = get_all_cached_stats()
+            if not all_stats:
+                console.print("[yellow]No cached stats. Use --refresh to compute.[/yellow]")
+                return
+
+            if as_json:
+                console.print(json_mod.dumps(all_stats, indent=2, default=str))
+                return
+
+            for tbl_name, s in all_stats.items():
+                stale = is_stats_stale(tbl_name, catalog)
+                stale_mark = " [yellow](stale)[/yellow]" if stale else ""
+                console.print(f"\n[bold]{tbl_name}[/bold]{stale_mark}")
+                console.print(f"  Rows: {s['row_count']}  |  Columns: {s['column_count']}  |  "
+                             f"Files: {s['data_files']}  |  Size: {s['size_bytes']} bytes  |  "
+                             f"Snapshots: {s['snapshot_count']}")
+                console.print(f"  Last modified: {s.get('last_modified', 'N/A')}")
+                console.print(f"  Cached at: {s.get('cached_at', 'N/A')}")
+            return
+
+        # Single table
+        if refresh:
+            stats = compute_table_stats(catalog, table_name)
+            console.print(f"[bold green]✓ Refreshed stats for {table_name}[/bold green]\n")
+        else:
+            stats = get_cached_stats(table_name)
+            if stats is None:
+                console.print(f"[yellow]No cached stats for {table_name}. Use --refresh to compute.[/yellow]")
+                return
+
+        if as_json:
+            console.print(json_mod.dumps(stats, indent=2, default=str))
+            return
+
+        full_name = table_name if "." in table_name else f"default.{table_name}"
+        stale = is_stats_stale(full_name, catalog)
+        stale_mark = " [yellow](stale)[/yellow]" if stale else ""
+
+        console.print(f"[bold]Stats for {full_name}[/bold]{stale_mark}\n")
+        console.print(f"  Rows: {stats['row_count']}")
+        console.print(f"  Columns: {stats['column_count']}")
+        console.print(f"  Data files: {stats['data_files']}")
+        console.print(f"  Size: {stats['size_bytes']} bytes")
+        console.print(f"  Snapshots: {stats['snapshot_count']}")
+        console.print(f"  Last modified: {stats.get('last_modified', 'N/A')}")
+        console.print(f"  Cached at: {stats.get('cached_at', 'N/A')}")
+
+        if stats.get("columns"):
+            console.print(f"\n[bold]Column stats:[/bold]")
+            tbl = Table(show_header=True, header_style="bold cyan")
+            tbl.add_column("Column")
+            tbl.add_column("Type")
+            tbl.add_column("Nulls")
+            tbl.add_column("Unique")
+            tbl.add_column("Min")
+            tbl.add_column("Max")
+
+            for col_name, col_info in stats["columns"].items():
+                tbl.add_row(
+                    col_name,
+                    col_info.get("type", ""),
+                    str(col_info.get("nulls", "")),
+                    str(col_info.get("unique", "")),
+                    str(col_info.get("min", "")),
+                    str(col_info.get("max", "")),
+                )
+            console.print(tbl)
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command("query-save")
 @click.argument("name")
 @click.argument("sql")
