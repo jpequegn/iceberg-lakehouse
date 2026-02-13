@@ -623,6 +623,9 @@ def insert_rows(
     arrow_table = pa.table(arrow_arrays)
     table.append(arrow_table)
 
+    from .audit import log_operation
+    log_operation(table_name, "insert", rows_affected=len(rows))
+
     return len(rows)
 
 
@@ -752,6 +755,10 @@ def update_rows(
     # Overwrite the table with updated data
     table.overwrite(updated_arrow)
 
+    from .audit import log_operation
+    log_operation(table_name, "update", rows_affected=match_count,
+                  details={"filter": filter_expr, "columns_updated": list(updates.keys())})
+
     return match_count
 
 
@@ -816,6 +823,10 @@ def delete_rows(
 
     # Overwrite the table with remaining data
     table.overwrite(remaining_arrow)
+
+    from .audit import log_operation
+    log_operation(table_name, "delete", rows_affected=match_count,
+                  details={"filter": filter_expr})
 
     return match_count
 
@@ -884,6 +895,9 @@ def rollback_table(
     target_ts = datetime.datetime.fromtimestamp(
         target.timestamp_ms / 1000, tz=datetime.timezone.utc
     ).isoformat()
+
+    from .audit import log_operation
+    log_operation(table_name, "rollback", details={"snapshot_id": target.snapshot_id})
 
     return {
         "snapshot_id": target.snapshot_id,
@@ -979,6 +993,10 @@ def expire_snapshots(
         msg = f"Expired {expired} snapshot(s), retained last {retain_last}"
     else:
         msg = f"Expired {expired} snapshot(s), {after_count} remaining"
+
+    from .audit import log_operation
+    log_operation(table_name, "expire_snapshots", details={"expired": expired, "remaining": after_count})
+
     return {"expired": expired, "remaining": after_count, "message": msg}
 
 
@@ -1130,13 +1148,13 @@ def alter_table(
         with table.update_schema() as update:
             update.add_column(column_name, iceberg_type)
 
-        return f"Added column '{column_name}' ({column_type}) to {table_name}"
+        msg = f"Added column '{column_name}' ({column_type}) to {table_name}"
 
     elif operation == "drop_column":
         with table.update_schema() as update:
             update.delete_column(column_name)
 
-        return f"Dropped column '{column_name}' from {table_name}"
+        msg = f"Dropped column '{column_name}' from {table_name}"
 
     elif operation == "rename_column":
         if not new_name:
@@ -1145,13 +1163,18 @@ def alter_table(
         with table.update_schema() as update:
             update.rename_column(column_name, new_name)
 
-        return f"Renamed column '{column_name}' to '{new_name}' in {table_name}"
+        msg = f"Renamed column '{column_name}' to '{new_name}' in {table_name}"
 
     else:
         raise ValueError(
             f"Unknown operation '{operation}'. "
             f"Supported: add_column, drop_column, rename_column"
         )
+
+    from .audit import log_operation
+    log_operation(table_name, "alter", details={"action": operation, "column": column_name})
+
+    return msg
 
 
 def upsert_rows(
@@ -1313,6 +1336,10 @@ def upsert_rows(
 
     # Overwrite the table with merged data
     table.overwrite(merged_arrow)
+
+    from .audit import log_operation
+    log_operation(table_name, "upsert", rows_affected=inserted_count + updated_count,
+                  details={"inserted": inserted_count, "updated": updated_count})
 
     return {"inserted": inserted_count, "updated": updated_count}
 
@@ -2042,6 +2069,9 @@ def compact_table(
     # Re-load to get updated metadata
     table = catalog.load_table(table_name)
     files_after, size_after = _count_data_files(table)
+
+    from .audit import log_operation
+    log_operation(table_name, "compact", details={"files_before": files_before, "files_after": files_after})
 
     return {
         "table": table_name,

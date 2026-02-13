@@ -1503,6 +1503,65 @@ def _format_rule_details(rule: dict) -> str:
     return ""
 
 
+@main.command("audit")
+@click.option("--table", "table_name", default=None, help="Filter by table name")
+@click.option("--operation", default=None, help="Filter by operation type")
+@click.option("--limit", default=50, help="Maximum entries to show")
+@click.option("--since", default=None, help="Show entries after this ISO timestamp")
+@click.option("--clear", "clear_flag", is_flag=True, help="Clear audit log")
+@click.option("--older-than", default=None, help="Clear entries older than this (e.g., '30d', '24h')")
+def audit_cmd(table_name: str, operation: str, limit: int, since: str, clear_flag: bool, older_than: str):
+    """Show or manage the audit log of write operations.
+
+    Examples:
+        lakehouse audit
+        lakehouse audit --table expenses --limit 20
+        lakehouse audit --operation insert
+        lakehouse audit --since 2026-02-01T00:00:00
+        lakehouse audit --clear
+        lakehouse audit --clear --older-than 30d
+    """
+    from .audit import get_audit_log, clear_audit_log
+
+    if clear_flag:
+        try:
+            result = clear_audit_log(older_than=older_than)
+            console.print(f"[bold green]✓ {result['message']}[/bold green]")
+        except Exception as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            raise click.Abort()
+        return
+
+    entries = get_audit_log(table_name=table_name, operation=operation, limit=limit, since=since)
+
+    if not entries:
+        console.print("[yellow]No audit log entries found.[/yellow]")
+        return
+
+    console.print(f"[bold]Audit log ({len(entries)} entries):[/bold]\n")
+    tbl = Table(show_header=True, header_style="bold cyan")
+    tbl.add_column("Timestamp")
+    tbl.add_column("Table")
+    tbl.add_column("Operation")
+    tbl.add_column("Rows")
+    tbl.add_column("Source")
+    tbl.add_column("Details")
+
+    for entry in entries:
+        details = entry.get("details", {})
+        details_str = ", ".join(f"{k}={v}" for k, v in details.items()) if details else ""
+        tbl.add_row(
+            entry.get("timestamp", "")[:19],
+            entry.get("table", ""),
+            entry.get("operation", ""),
+            str(entry.get("rows_affected", 0)),
+            entry.get("source", ""),
+            details_str[:60],
+        )
+
+    console.print(tbl)
+
+
 @main.command("query-save")
 @click.argument("name")
 @click.argument("sql")
