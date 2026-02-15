@@ -2466,6 +2466,102 @@ def clone_discard(clone_table: str):
         raise click.Abort()
 
 
+@main.command("join")
+@click.argument("sql")
+@click.option("--into", "target_table", default=None, help="Save results to a table")
+@click.option("--mode", type=click.Choice(["overwrite", "append"]), default="overwrite", help="Write mode for --into")
+@click.option("--max-rows", default=100, help="Maximum rows to return")
+@click.option("--format", "output_format", type=click.Choice(["table", "csv", "json"]), default="table")
+def join_cmd(sql: str, target_table: str, mode: str, max_rows: int, output_format: str):
+    """Execute a cross-table join query.
+
+    Examples:
+        lakehouse join "SELECT e.*, n.text FROM expenses e JOIN notes n ON e.id = n.id"
+        lakehouse join "SELECT ..." --into analytics.report
+        lakehouse join "SELECT ..." --format json --max-rows 500
+    """
+    from .catalog import get_catalog
+    from .joins import execute_join, join_to_table
+
+    catalog = get_catalog()
+
+    try:
+        if target_table:
+            result = join_to_table(catalog, sql, target_table, mode=mode)
+            console.print(f"[bold green]✓ {result['message']}[/bold green]")
+            return
+
+        result = execute_join(catalog, sql, max_rows=max_rows)
+        df = result["dataframe"]
+
+        if df.empty:
+            console.print("[yellow]Join returned no results.[/yellow]")
+            return
+
+        if output_format == "table":
+            table = Table(show_header=True, header_style="bold magenta")
+            for col in df.columns:
+                table.add_column(str(col))
+            for _, row in df.iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+        elif output_format == "csv":
+            print(df.to_csv(index=False))
+        elif output_format == "json":
+            print(df.to_json(orient="records", indent=2))
+
+        console.print(f"\n[dim]({result['row_count']} rows)[/dim]")
+
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@main.command("join-suggest")
+@click.argument("table_name")
+def join_suggest_cmd(table_name: str):
+    """Suggest possible joins for a table based on matching column names.
+
+    Examples:
+        lakehouse join-suggest expenses
+    """
+    from .catalog import get_catalog
+    from .joins import suggest_joins
+
+    catalog = get_catalog()
+
+    try:
+        suggestions = suggest_joins(catalog, table_name)
+        if not suggestions:
+            console.print(f"[yellow]No join suggestions found for {table_name}[/yellow]")
+            return
+
+        console.print(f"[bold]Join suggestions for {table_name} ({len(suggestions)}):[/bold]\n")
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Join Table")
+        table.add_column("Column")
+        table.add_column("Source Type")
+        table.add_column("Target Type")
+        table.add_column("Example SQL")
+
+        for s in suggestions:
+            table.add_row(
+                s["table"],
+                s["column"],
+                s["source_type"],
+                s["target_type"],
+                s["join_sql"][:60],
+            )
+        console.print(table)
+
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.group("lineage")
 def lineage_group():
     """Track data lineage (table-level dependency graph).
