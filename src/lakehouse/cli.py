@@ -2225,6 +2225,147 @@ def view_drop(name: str):
         raise click.Abort()
 
 
+@main.group("tag")
+def tag_group():
+    """Manage table tags for organization and discovery.
+
+    Examples:
+        lakehouse tag add expenses finance pii
+        lakehouse tag show expenses
+        lakehouse tag search finance
+        lakehouse tag remove expenses deprecated
+    """
+    pass
+
+
+@tag_group.command("add")
+@click.argument("table_name")
+@click.argument("tags", nargs=-1, required=True)
+def tag_add(table_name: str, tags: tuple):
+    """Add tags to a table."""
+    from .tagging import tag_table
+
+    result = tag_table(table_name, list(tags))
+    console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    console.print(f"  Tags: {', '.join(result['tags'])}")
+
+
+@tag_group.command("remove")
+@click.argument("table_name")
+@click.argument("tags", nargs=-1, required=True)
+def tag_remove(table_name: str, tags: tuple):
+    """Remove tags from a table."""
+    from .tagging import untag_table
+
+    result = untag_table(table_name, list(tags))
+    console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    if result["tags"]:
+        console.print(f"  Remaining tags: {', '.join(result['tags'])}")
+
+
+@tag_group.command("show")
+@click.argument("table_name")
+def tag_show(table_name: str):
+    """Show tags for a table."""
+    from .tagging import get_tags
+
+    tags = get_tags(table_name)
+    full_name = table_name if "." in table_name else f"default.{table_name}"
+    if tags:
+        console.print(f"[bold]{full_name}:[/bold] {', '.join(tags)}")
+    else:
+        console.print(f"[yellow]{full_name} has no tags[/yellow]")
+
+
+@tag_group.command("search")
+@click.argument("tag")
+def tag_search(tag: str):
+    """Find all tables with a given tag."""
+    from .tagging import search_by_tag
+
+    tables = search_by_tag(tag)
+    if tables:
+        console.print(f"[bold]Tables tagged '{tag}' ({len(tables)}):[/bold]")
+        for t in tables:
+            console.print(f"  • {t}")
+    else:
+        console.print(f"[yellow]No tables tagged '{tag}'[/yellow]")
+
+
+@main.command("bookmark")
+@click.argument("table_name", required=False)
+@click.option("--list", "list_flag", is_flag=True, help="List all bookmarks")
+@click.option("--remove", "remove_flag", is_flag=True, help="Remove bookmark")
+def bookmark_cmd(table_name: str, list_flag: bool, remove_flag: bool):
+    """Bookmark tables for quick access.
+
+    Examples:
+        lakehouse bookmark expenses
+        lakehouse bookmark --list
+        lakehouse bookmark expenses --remove
+    """
+    from .tagging import bookmark_table, unbookmark_table, list_bookmarks
+
+    if list_flag:
+        bookmarks = list_bookmarks()
+        if bookmarks:
+            console.print(f"[bold]Bookmarked tables ({len(bookmarks)}):[/bold]")
+            for b in bookmarks:
+                console.print(f"  ★ {b}")
+        else:
+            console.print("[yellow]No bookmarks[/yellow]")
+        return
+
+    if not table_name:
+        console.print("[bold red]Error:[/bold red] Provide a table name or use --list")
+        raise click.Abort()
+
+    if remove_flag:
+        result = unbookmark_table(table_name)
+    else:
+        result = bookmark_table(table_name)
+
+    console.print(f"[bold green]✓ {result['message']}[/bold green]")
+
+
+@main.command("search")
+@click.argument("query")
+def search_cmd(query: str):
+    """Search tables by name, tag, or description.
+
+    Examples:
+        lakehouse search finance
+        lakehouse search expenses
+    """
+    from .catalog import get_catalog
+    from .tagging import search_tables
+
+    catalog = get_catalog()
+    results = search_tables(query, catalog=catalog)
+
+    if not results:
+        console.print(f"[yellow]No tables matching '{query}'[/yellow]")
+        return
+
+    console.print(f"[bold]Search results for '{query}' ({len(results)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Table")
+    table.add_column("Tags")
+    table.add_column("Description")
+    table.add_column("Match")
+    table.add_column("★", justify="center")
+
+    for r in results:
+        table.add_row(
+            r["table"],
+            ", ".join(r["tags"]) if r["tags"] else "",
+            r["description"][:50] if r["description"] else "",
+            ", ".join(r["match_type"]),
+            "★" if r["bookmarked"] else "",
+        )
+    console.print(table)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
