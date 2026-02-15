@@ -1432,6 +1432,57 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="find_duplicates",
+            description="Find duplicate rows in a table based on key columns.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns (defaults to all columns)"},
+                    "limit": {"type": "integer", "description": "Max duplicate groups (default: 100)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="dedup_summary",
+            description="Get deduplication summary: total rows, unique rows, duplicate count and percentage.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns (defaults to all columns)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="remove_duplicates",
+            description="Remove duplicate rows from a table. Dry run by default (preview without applying).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns"},
+                    "keep": {"type": "string", "enum": ["first", "last"], "description": "Keep first or last occurrence (default: first)"},
+                    "dry_run": {"type": "boolean", "description": "Preview without applying (default: true)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="dedup_report",
+            description="Generate comprehensive dedup report with per-column uniqueness analysis and suggested keys.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
             name="get_table_changes",
             description="Get row-level changes (INSERT, UPDATE, DELETE) between two snapshots of a table. Detects updates when key columns match but values differ.",
             inputSchema={
@@ -4265,6 +4316,71 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Verify backup failed: {str(e)}")]
+
+        elif name == "find_duplicates":
+            from .dedup import find_duplicates as _find_dups
+            try:
+                catalog = get_catalog()
+                result = _find_dups(
+                    catalog, arguments["table_name"],
+                    key_columns=arguments.get("key_columns"),
+                    limit=arguments.get("limit", 100),
+                )
+                lines = [f"## Duplicates: {result['message']}\n"]
+                for d in result["duplicates"][:20]:
+                    key_vals = {k: d[k] for k in result["key_columns"]}
+                    lines.append(f"- {key_vals} — {d['_dup_count']} copies")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Find duplicates failed: {str(e)}")]
+
+        elif name == "dedup_summary":
+            from .dedup import dedup_summary as _dedup_summary
+            try:
+                catalog = get_catalog()
+                result = _dedup_summary(catalog, arguments["table_name"], key_columns=arguments.get("key_columns"))
+                lines = [
+                    f"## Dedup Summary\n",
+                    f"{result['message']}\n",
+                    f"- **Total rows:** {result['total_rows']:,}",
+                    f"- **Unique rows:** {result['unique_rows']:,}",
+                    f"- **Duplicate rows:** {result['duplicate_rows']:,}",
+                    f"- **Duplicate %:** {result['duplicate_pct']:.1f}%",
+                ]
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Dedup summary failed: {str(e)}")]
+
+        elif name == "remove_duplicates":
+            from .dedup import remove_duplicates as _remove_dups
+            try:
+                catalog = get_catalog()
+                result = _remove_dups(
+                    catalog, arguments["table_name"],
+                    key_columns=arguments.get("key_columns"),
+                    keep=arguments.get("keep", "first"),
+                    dry_run=arguments.get("dry_run", True),
+                )
+                return [TextContent(type="text", text=f"## Remove Duplicates\n\n{result['message']}\n\n- **Removed:** {result['removed']}\n- **Remaining:** {result['remaining']}\n- **Dry run:** {'Yes' if result['dry_run'] else 'No'}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Remove duplicates failed: {str(e)}")]
+
+        elif name == "dedup_report":
+            from .dedup import dedup_report as _dedup_report
+            try:
+                catalog = get_catalog()
+                result = _dedup_report(catalog, arguments["table_name"], key_columns=arguments.get("key_columns"))
+                lines = [f"## Dedup Report\n", f"{result['message']}\n"]
+                lines.append("| Column | Unique | Uniqueness % | Good Key? |")
+                lines.append("|--------|--------|-------------|-----------|")
+                for col in result["column_analysis"]:
+                    good = "Yes" if col["good_dedup_key"] else "No"
+                    lines.append(f"| {col['column']} | {col['unique_values']} | {col['uniqueness_pct']:.1f}% | {good} |")
+                if result["suggested_keys"]:
+                    lines.append(f"\n**Suggested keys:** {', '.join(result['suggested_keys'])}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Dedup report failed: {str(e)}")]
 
         elif name == "get_table_changes":
             from .cdc import get_changes as _get_changes
