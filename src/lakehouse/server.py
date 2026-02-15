@@ -1166,6 +1166,58 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="set_column_description",
+            description="Set a description for a table column to provide context for queries and governance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "column_name": {"type": "string", "description": "Column name"},
+                    "description": {"type": "string", "description": "Column description"},
+                },
+                "required": ["table_name", "column_name", "description"],
+            },
+        ),
+        Tool(
+            name="classify_column",
+            description="Set data classification for a column (pii, financial, public, internal, confidential).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "column_name": {"type": "string", "description": "Column name"},
+                    "classification": {
+                        "type": "string",
+                        "enum": ["pii", "financial", "public", "internal", "confidential"],
+                        "description": "Data classification",
+                    },
+                },
+                "required": ["table_name", "column_name", "classification"],
+            },
+        ),
+        Tool(
+            name="get_enriched_schema",
+            description="Get table schema enriched with descriptions, classifications, and glossary matches. The primary tool for understanding table context.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="search_glossary",
+            description="Search the business glossary for terms by name, alias, or definition text.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -3596,6 +3648,54 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Evaluate retention failed: {str(e)}")]
+
+        elif name == "set_column_description":
+            from .catalog_metadata import set_column_description as _set_desc
+            try:
+                result = _set_desc(arguments["table_name"], arguments["column_name"], arguments["description"])
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Set column description failed: {str(e)}")]
+
+        elif name == "classify_column":
+            from .catalog_metadata import classify_column as _classify
+            try:
+                result = _classify(arguments["table_name"], arguments["column_name"], arguments["classification"])
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Classify column failed: {str(e)}")]
+
+        elif name == "get_enriched_schema":
+            from .catalog_metadata import get_enriched_schema as _enriched
+            try:
+                catalog = get_catalog()
+                result = _enriched(catalog, arguments["table_name"])
+                lines = [f"## Enriched Schema: {result['table']}\n"]
+                lines.append(f"**Fields:** {result['total_fields']} ({result['described_fields']} described, {result['classified_fields']} classified)\n")
+                lines.append("| Field | Type | Description | Classification | Glossary |")
+                lines.append("|-------|------|-------------|----------------|----------|")
+                for f in result["fields"]:
+                    lines.append(
+                        f"| {f['name']} | {f['type']} | {f['description'] or '-'} | "
+                        f"{f['classification'] or '-'} | {', '.join(f['glossary_matches']) or '-'} |"
+                    )
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get enriched schema failed: {str(e)}")]
+
+        elif name == "search_glossary":
+            from .catalog_metadata import search_glossary as _search_gl
+            try:
+                results = _search_gl(arguments["query"])
+                if not results:
+                    return [TextContent(type="text", text="No matching glossary terms found.")]
+                lines = ["## Glossary Search Results\n"]
+                for r in results:
+                    aliases = f" (aliases: {', '.join(r['aliases'])})" if r["aliases"] else ""
+                    lines.append(f"- **{r['term']}**: {r['definition']}{aliases}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Search glossary failed: {str(e)}")]
 
         elif name == "dashboard":
             try:

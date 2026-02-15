@@ -3420,6 +3420,201 @@ def retention_run(table_name: str, dry_run: bool):
             console.print(f"[green]{r['table']}: {r['message']}[/green]")
 
 
+@main.group("catalog")
+def catalog_group():
+    """Data catalog enrichment commands."""
+    pass
+
+
+@catalog_group.command("describe-column")
+@click.argument("table_name")
+@click.argument("column_name")
+@click.argument("description")
+def catalog_describe_column(table_name: str, column_name: str, description: str):
+    """Set a column description.
+
+    Examples:
+        lakehouse catalog describe-column expenses amount "Total expense amount in USD"
+    """
+    from .catalog_metadata import set_column_description
+
+    result = set_column_description(table_name, column_name, description)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@catalog_group.command("column-descriptions")
+@click.argument("table_name")
+def catalog_column_descriptions(table_name: str):
+    """Show column descriptions for a table.
+
+    Examples:
+        lakehouse catalog column-descriptions expenses
+    """
+    from .catalog_metadata import get_column_descriptions
+
+    result = get_column_descriptions(table_name)
+    if not result["descriptions"]:
+        console.print(f"No descriptions for '{table_name}'")
+        return
+    table = Table(title=f"Column Descriptions: {result['table']}")
+    table.add_column("Column", style="cyan")
+    table.add_column("Description")
+    for col, desc in result["descriptions"].items():
+        table.add_row(col, desc)
+    console.print(table)
+
+
+@catalog_group.command("classify")
+@click.argument("table_name")
+@click.argument("column_name")
+@click.argument("classification")
+def catalog_classify(table_name: str, column_name: str, classification: str):
+    """Classify a column (pii, financial, public, internal, confidential).
+
+    Examples:
+        lakehouse catalog classify users email pii
+    """
+    from .catalog_metadata import classify_column
+
+    result = classify_column(table_name, column_name, classification)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@catalog_group.command("classifications")
+@click.option("--table", default=None, help="Filter by table")
+@click.option("--type", "cls_type", default=None, help="Filter by classification type")
+def catalog_classifications(table: str, cls_type: str):
+    """List data classifications.
+
+    Examples:
+        lakehouse catalog classifications --type pii
+    """
+    from .catalog_metadata import get_classifications
+
+    results = get_classifications(table_name=table, classification=cls_type)
+    if not results:
+        console.print("No classifications found.")
+        return
+    tbl = Table(title="Data Classifications")
+    tbl.add_column("Table", style="cyan")
+    tbl.add_column("Column")
+    tbl.add_column("Classification", style="yellow")
+    for r in results:
+        tbl.add_row(r["table"], r["column"], r["classification"])
+    console.print(tbl)
+
+
+@catalog_group.group("glossary")
+def glossary_group():
+    """Business glossary commands."""
+    pass
+
+
+@glossary_group.command("add")
+@click.argument("term")
+@click.argument("definition")
+@click.option("--aliases", default=None, help="Comma-separated aliases")
+def glossary_add(term: str, definition: str, aliases: str):
+    """Add a glossary term.
+
+    Examples:
+        lakehouse catalog glossary add MRR "Monthly Recurring Revenue" --aliases "monthly revenue"
+    """
+    from .catalog_metadata import add_glossary_term
+
+    alias_list = [a.strip() for a in aliases.split(",")] if aliases else None
+    result = add_glossary_term(term, definition, aliases=alias_list)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@glossary_group.command("search")
+@click.argument("query")
+def glossary_search(query: str):
+    """Search glossary terms.
+
+    Examples:
+        lakehouse catalog glossary search revenue
+    """
+    from .catalog_metadata import search_glossary
+
+    results = search_glossary(query)
+    if not results:
+        console.print("No matching terms found.")
+        return
+    for r in results:
+        aliases = f" (aliases: {', '.join(r['aliases'])})" if r["aliases"] else ""
+        console.print(f"[bold]{r['term']}[/bold]: {r['definition']}{aliases}")
+
+
+@glossary_group.command("list")
+def glossary_list():
+    """List all glossary terms.
+
+    Examples:
+        lakehouse catalog glossary list
+    """
+    from .catalog_metadata import list_glossary
+
+    terms = list_glossary()
+    if not terms:
+        console.print("No glossary terms defined.")
+        return
+    table = Table(title="Business Glossary")
+    table.add_column("Term", style="cyan")
+    table.add_column("Definition")
+    table.add_column("Aliases", style="dim")
+    for t in terms:
+        table.add_row(t["term"], t["definition"], ", ".join(t["aliases"]) or "-")
+    console.print(table)
+
+
+@glossary_group.command("remove")
+@click.argument("term")
+def glossary_remove(term: str):
+    """Remove a glossary term.
+
+    Examples:
+        lakehouse catalog glossary remove MRR
+    """
+    from .catalog_metadata import remove_glossary_term
+
+    result = remove_glossary_term(term)
+    console.print(result["message"])
+
+
+@catalog_group.command("enriched-schema")
+@click.argument("table_name")
+def catalog_enriched_schema(table_name: str):
+    """Show enriched schema with descriptions, classifications, and glossary.
+
+    Examples:
+        lakehouse catalog enriched-schema expenses
+    """
+    from .catalog_metadata import get_enriched_schema
+
+    catalog = _get_catalog()
+    result = get_enriched_schema(catalog, table_name)
+
+    table = Table(title=f"Enriched Schema: {result['table']}")
+    table.add_column("Field", style="cyan")
+    table.add_column("Type")
+    table.add_column("Description")
+    table.add_column("Classification", style="yellow")
+    table.add_column("Glossary", style="dim")
+
+    for f in result["fields"]:
+        table.add_row(
+            f["name"],
+            f["type"],
+            f["description"] or "-",
+            f["classification"] or "-",
+            ", ".join(f["glossary_matches"]) or "-",
+        )
+    console.print(table)
+    console.print(f"\n{result['described_fields']}/{result['total_fields']} described, "
+                  f"{result['classified_fields']}/{result['total_fields']} classified")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
