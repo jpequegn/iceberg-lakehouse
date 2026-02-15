@@ -1684,6 +1684,55 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="set_auto_refresh",
+            description="Enable or configure auto-refresh for a table. When source data changes, automatically cascade refreshes to materialized views, pipelines, and caches downstream.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "enabled": {"type": "boolean", "description": "Enable/disable (default: true)"},
+                    "cascade_depth": {"type": "integer", "description": "Max cascade depth (default: 3)"},
+                    "refresh_matviews": {"type": "boolean", "description": "Refresh materialized views (default: true)"},
+                    "rerun_pipelines": {"type": "boolean", "description": "Re-run pipelines (default: true)"},
+                    "invalidate_caches": {"type": "boolean", "description": "Invalidate query caches (default: true)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="get_refresh_plan",
+            description="Dry-run: show what would be refreshed downstream of a table without executing. Returns ordered list of actions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Source table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="trigger_refresh",
+            description="Trigger a cascade refresh from a source table. Walks the lineage graph and refreshes materialized views, re-runs pipelines, and invalidates caches.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Source table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="get_refresh_history",
+            description="Get history of auto-refresh executions with results.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Filter by table name"},
+                    "limit": {"type": "integer", "description": "Max entries (default: 20)"},
+                },
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -4745,6 +4794,51 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get sample stats failed: {str(e)}")]
+
+        elif name == "set_auto_refresh":
+            try:
+                from .auto_refresh import set_auto_refresh
+                config = {}
+                for key in ("cascade_depth", "refresh_matviews", "rerun_pipelines", "invalidate_caches"):
+                    if key in arguments:
+                        config[key] = arguments[key]
+                result = set_auto_refresh(
+                    table_name=arguments["table_name"],
+                    enabled=arguments.get("enabled", True),
+                    config=config or None,
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Set auto-refresh failed: {str(e)}")]
+
+        elif name == "get_refresh_plan":
+            try:
+                from .auto_refresh import get_refresh_plan
+                catalog = get_catalog()
+                result = get_refresh_plan(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get refresh plan failed: {str(e)}")]
+
+        elif name == "trigger_refresh":
+            try:
+                from .auto_refresh import trigger_refresh
+                catalog = get_catalog()
+                result = trigger_refresh(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Trigger refresh failed: {str(e)}")]
+
+        elif name == "get_refresh_history":
+            try:
+                from .auto_refresh import get_refresh_history
+                result = get_refresh_history(
+                    table_name=arguments.get("table_name"),
+                    limit=arguments.get("limit", 20),
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get refresh history failed: {str(e)}")]
 
         elif name == "dashboard":
             try:

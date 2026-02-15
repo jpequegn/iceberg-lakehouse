@@ -4878,6 +4878,131 @@ def sample_create(table_name: str, sample_name: str, method: str, fraction: floa
     console.print(f"[green]{result['message']}[/green]")
 
 
+@main.group("auto-refresh")
+def auto_refresh():
+    """Manage dependency auto-refresh."""
+    pass
+
+
+main.add_command(auto_refresh)
+
+
+@auto_refresh.command("enable")
+@click.argument("table_name")
+@click.option("--depth", default=3, help="Max cascade depth")
+@click.option("--matviews/--no-matviews", default=True, help="Refresh materialized views")
+@click.option("--pipelines/--no-pipelines", default=True, help="Re-run pipelines")
+@click.option("--caches/--no-caches", default=True, help="Invalidate caches")
+def auto_refresh_enable(table_name: str, depth: int, matviews: bool, pipelines: bool, caches: bool):
+    """Enable auto-refresh for a table."""
+    from .auto_refresh import set_auto_refresh
+    result = set_auto_refresh(table_name, enabled=True, config={
+        "cascade_depth": depth,
+        "refresh_matviews": matviews,
+        "rerun_pipelines": pipelines,
+        "invalidate_caches": caches,
+    })
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@auto_refresh.command("disable")
+@click.argument("table_name")
+def auto_refresh_disable(table_name: str):
+    """Disable auto-refresh for a table."""
+    from .auto_refresh import remove_auto_refresh
+    result = remove_auto_refresh(table_name)
+    console.print(result["message"])
+
+
+@auto_refresh.command("list")
+def auto_refresh_list():
+    """List auto-refresh configurations."""
+    from .auto_refresh import list_auto_refresh
+    configs = list_auto_refresh()
+    if not configs:
+        console.print("[yellow]No auto-refresh configurations[/yellow]")
+        return
+
+    table = Table(title="Auto-Refresh Configurations")
+    table.add_column("Table", style="cyan")
+    table.add_column("Enabled")
+    table.add_column("Depth")
+    table.add_column("Matviews")
+    table.add_column("Pipelines")
+    table.add_column("Caches")
+
+    for c in configs:
+        table.add_row(
+            c["table"],
+            "[green]Yes[/green]" if c["enabled"] else "[red]No[/red]",
+            str(c.get("cascade_depth", 3)),
+            "Yes" if c.get("refresh_matviews", True) else "No",
+            "Yes" if c.get("rerun_pipelines", True) else "No",
+            "Yes" if c.get("invalidate_caches", True) else "No",
+        )
+    console.print(table)
+
+
+@auto_refresh.command("plan")
+@click.argument("table_name")
+def auto_refresh_plan(table_name: str):
+    """Show what would be refreshed (dry-run)."""
+    from .catalog import get_catalog
+    from .auto_refresh import get_refresh_plan
+    catalog = get_catalog()
+    plan = get_refresh_plan(catalog, table_name)
+    console.print(f"[bold]{plan['message']}[/bold]")
+
+    if plan["actions"]:
+        table = Table(title="Refresh Plan")
+        table.add_column("Table", style="cyan")
+        table.add_column("Action")
+        table.add_column("Depth")
+        for a in plan["actions"]:
+            table.add_row(a["table"], a["action"], str(a["depth"]))
+        console.print(table)
+
+
+@auto_refresh.command("trigger")
+@click.argument("table_name")
+def auto_refresh_trigger(table_name: str):
+    """Manually trigger cascade refresh."""
+    from .catalog import get_catalog
+    from .auto_refresh import trigger_refresh
+    catalog = get_catalog()
+    result = trigger_refresh(catalog, table_name)
+    console.print(f"[bold]{result['message']}[/bold]")
+
+
+@auto_refresh.command("history")
+@click.option("--table", default=None, help="Filter by table")
+@click.option("--limit", default=20, help="Max entries")
+def auto_refresh_history(table: str, limit: int):
+    """Show refresh history."""
+    from .auto_refresh import get_refresh_history
+    history = get_refresh_history(table_name=table, limit=limit)
+    if not history:
+        console.print("[yellow]No refresh history[/yellow]")
+        return
+
+    table_obj = Table(title="Refresh History")
+    table_obj.add_column("Time", style="cyan")
+    table_obj.add_column("Table")
+    table_obj.add_column("Actions")
+    table_obj.add_column("Success")
+    table_obj.add_column("Errors")
+
+    for h in history:
+        table_obj.add_row(
+            h.get("triggered_at", "")[:19],
+            h["table"],
+            str(h["actions_executed"]),
+            str(h["successes"]),
+            str(h["errors"]),
+        )
+    console.print(table_obj)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
