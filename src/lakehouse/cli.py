@@ -2466,6 +2466,170 @@ def clone_discard(clone_table: str):
         raise click.Abort()
 
 
+@main.group("matview")
+def matview_group():
+    """Manage materialized views (cached query results).
+
+    Examples:
+        lakehouse matview create monthly_totals "SELECT category, SUM(amount) FROM expenses GROUP BY category"
+        lakehouse matview list
+        lakehouse matview query monthly_totals
+        lakehouse matview refresh monthly_totals
+        lakehouse matview check monthly_totals
+        lakehouse matview drop monthly_totals
+    """
+    pass
+
+
+@matview_group.command("create")
+@click.argument("name")
+@click.argument("sql")
+@click.option("--description", "-d", default="", help="Description for the view")
+def matview_create(name: str, sql: str, description: str):
+    """Create a materialized view (execute SQL and cache results)."""
+    from .catalog import get_catalog
+    from .query import QueryEngine
+    from .matviews import create_materialized_view
+
+    catalog = get_catalog()
+    engine = QueryEngine(catalog=catalog)
+
+    try:
+        result = create_materialized_view(name, sql, engine, catalog, description=description)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+        console.print(f"  Backing table: {result['backing_table']}")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@matview_group.command("list")
+def matview_list():
+    """List all materialized views."""
+    from .matviews import list_materialized_views
+
+    views = list_materialized_views()
+    if not views:
+        console.print("[yellow]No materialized views.[/yellow]")
+        return
+
+    console.print(f"[bold]Materialized Views ({len(views)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Name")
+    table.add_column("SQL")
+    table.add_column("Rows", justify="right")
+    table.add_column("Refreshed")
+    table.add_column("Description")
+
+    for v in views:
+        sql_preview = v["sql"][:50] + "..." if len(v["sql"]) > 50 else v["sql"]
+        table.add_row(
+            v["name"],
+            sql_preview,
+            str(v["row_count"]),
+            v["last_refreshed"][:19],
+            v.get("description", ""),
+        )
+    console.print(table)
+
+
+@matview_group.command("query")
+@click.argument("name")
+@click.option("--max-rows", default=100, help="Maximum rows to return")
+@click.option("--format", "output_format", type=click.Choice(["table", "csv", "json"]), default="table")
+def matview_query(name: str, max_rows: int, output_format: str):
+    """Query cached results of a materialized view (fast)."""
+    from .catalog import get_catalog
+    from .query import QueryEngine
+    from .matviews import query_materialized_view
+
+    catalog = get_catalog()
+    engine = QueryEngine(catalog=catalog)
+
+    try:
+        df = query_materialized_view(name, engine, max_rows=max_rows)
+
+        if df.empty:
+            console.print("[yellow]View returned no results.[/yellow]")
+            return
+
+        if output_format == "table":
+            table = Table(show_header=True, header_style="bold magenta")
+            for col in df.columns:
+                table.add_column(str(col))
+            for _, row in df.iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+        elif output_format == "csv":
+            print(df.to_csv(index=False))
+        elif output_format == "json":
+            print(df.to_json(orient="records", indent=2))
+
+        console.print(f"\n[dim]({len(df)} rows)[/dim]")
+
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@matview_group.command("refresh")
+@click.argument("name")
+def matview_refresh(name: str):
+    """Refresh a materialized view (re-execute SQL)."""
+    from .catalog import get_catalog
+    from .query import QueryEngine
+    from .matviews import refresh_materialized_view
+
+    catalog = get_catalog()
+    engine = QueryEngine(catalog=catalog)
+
+    try:
+        result = refresh_materialized_view(name, engine, catalog)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@matview_group.command("check")
+@click.argument("name")
+def matview_check(name: str):
+    """Check if a materialized view is stale."""
+    from .catalog import get_catalog
+    from .matviews import check_materialized_view_freshness
+
+    catalog = get_catalog()
+
+    try:
+        result = check_materialized_view_freshness(name, catalog)
+        if result["stale"]:
+            console.print(f"[yellow]{result['message']}[/yellow]")
+            for t in result["changed_tables"]:
+                console.print(f"  • {t}")
+        else:
+            console.print(f"[green]{result['message']}[/green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@matview_group.command("drop")
+@click.argument("name")
+def matview_drop(name: str):
+    """Drop a materialized view and its backing table."""
+    from .catalog import get_catalog
+    from .matviews import drop_materialized_view
+
+    catalog = get_catalog()
+
+    try:
+        result = drop_materialized_view(name, catalog)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command("join")
 @click.argument("sql")
 @click.option("--into", "target_table", default=None, help="Save results to a table")
