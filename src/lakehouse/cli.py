@@ -2366,6 +2366,138 @@ def search_cmd(query: str):
     console.print(table)
 
 
+@main.group("lineage")
+def lineage_group():
+    """Track data lineage (table-level dependency graph).
+
+    Examples:
+        lakehouse lineage add --source expenses --source categories --target spending_report
+        lakehouse lineage upstream spending_report
+        lakehouse lineage downstream expenses
+        lakehouse lineage graph
+        lakehouse lineage remove --source expenses --target spending_report
+        lakehouse lineage impact expenses
+    """
+    pass
+
+
+@lineage_group.command("add")
+@click.option("--source", "-s", "sources", multiple=True, required=True, help="Source table name (repeat for multiple)")
+@click.option("--target", "-t", "target", required=True, help="Target table name")
+@click.option("--operation", "-o", default="manual", help="Operation type (manual, insert_from, view, pipeline)")
+@click.option("--sql", default=None, help="SQL that produced this relationship")
+def lineage_add(sources: tuple, target: str, operation: str, sql: str):
+    """Record a lineage edge: sources → target."""
+    from .lineage import record_lineage
+
+    try:
+        result = record_lineage(list(sources), target, operation=operation, sql=sql)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@lineage_group.command("upstream")
+@click.argument("table_name")
+@click.option("--direct", is_flag=True, help="Show only direct dependencies")
+def lineage_upstream(table_name: str, direct: bool):
+    """Show tables that feed into this table."""
+    from .lineage import get_upstream
+
+    deps = get_upstream(table_name, transitive=not direct)
+    if not deps:
+        console.print(f"[yellow]No upstream dependencies for {table_name}[/yellow]")
+        return
+
+    mode = "direct" if direct else "all"
+    console.print(f"[bold]Upstream dependencies for {table_name} ({mode}, {len(deps)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Table")
+    table.add_column("Operation")
+    table.add_column("Depth", justify="right")
+    for d in deps:
+        table.add_row(d["table"], d["operation"], str(d["depth"]))
+    console.print(table)
+
+
+@lineage_group.command("downstream")
+@click.argument("table_name")
+@click.option("--direct", is_flag=True, help="Show only direct dependents")
+def lineage_downstream(table_name: str, direct: bool):
+    """Show tables that depend on this table."""
+    from .lineage import get_downstream
+
+    deps = get_downstream(table_name, transitive=not direct)
+    if not deps:
+        console.print(f"[yellow]No downstream dependents for {table_name}[/yellow]")
+        return
+
+    mode = "direct" if direct else "all"
+    console.print(f"[bold]Downstream dependents of {table_name} ({mode}, {len(deps)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Table")
+    table.add_column("Operation")
+    table.add_column("Depth", justify="right")
+    for d in deps:
+        table.add_row(d["table"], d["operation"], str(d["depth"]))
+    console.print(table)
+
+
+@lineage_group.command("graph")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def lineage_graph(as_json: bool):
+    """Show the full lineage graph."""
+    import json as json_mod
+    from .lineage import get_lineage_graph
+
+    graph = get_lineage_graph()
+
+    if as_json:
+        console.print(json_mod.dumps(graph, indent=2))
+        return
+
+    if not graph["nodes"]:
+        console.print("[yellow]No lineage data recorded.[/yellow]")
+        return
+
+    console.print(f"[bold]Lineage Graph ({graph['node_count']} tables, {graph['edge_count']} edges):[/bold]\n")
+    for edge in graph["edges"]:
+        sources = ", ".join(edge["sources"])
+        console.print(f"  {sources} [dim]──({edge['operation']})──▶[/dim] {edge['target']}")
+
+
+@lineage_group.command("remove")
+@click.option("--source", "-s", "source", required=True, help="Source table name")
+@click.option("--target", "-t", "target", required=True, help="Target table name")
+def lineage_remove(source: str, target: str):
+    """Remove a lineage edge."""
+    from .lineage import remove_lineage
+
+    result = remove_lineage(source, target)
+    console.print(f"[bold green]✓ {result['message']}[/bold green]")
+
+
+@lineage_group.command("impact")
+@click.argument("table_name")
+def lineage_impact(table_name: str):
+    """Analyze impact of dropping or modifying a table."""
+    from .lineage import get_impact_analysis
+
+    result = get_impact_analysis(table_name)
+    console.print(f"[bold]{result['message']}[/bold]")
+
+    if result["details"]:
+        console.print()
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Affected Table")
+        table.add_column("Via Operation")
+        table.add_column("Depth", justify="right")
+        for d in result["details"]:
+            table.add_row(d["table"], d["operation"], str(d["depth"]))
+        console.print(table)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
