@@ -26,6 +26,7 @@ from .tagging import tag_table, untag_table, get_tags, search_by_tag, set_table_
 from .lineage import record_lineage, get_upstream, get_downstream, get_lineage_graph, remove_lineage, get_impact_analysis
 from .cloning import clone_table, list_clones, promote_clone, discard_clone
 from .joins import execute_join, join_to_table, suggest_joins
+from .matviews import create_materialized_view, refresh_materialized_view, list_materialized_views, drop_materialized_view, query_materialized_view, check_materialized_view_freshness
 
 
 # Initialize server
@@ -1335,6 +1336,58 @@ async def list_tools() -> list[Tool]:
                     "table_name": {"type": "string", "description": "Table to find join partners for"},
                 },
                 "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="create_materialized_view",
+            description="Create a materialized view — execute SQL and cache results as an Iceberg table for fast repeated access.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "View name"},
+                    "sql": {"type": "string", "description": "SQL SELECT query"},
+                    "description": {"type": "string", "description": "Optional description"},
+                },
+                "required": ["name", "sql"],
+            },
+        ),
+        Tool(
+            name="list_materialized_views",
+            description="List all materialized views with metadata and freshness info.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="query_materialized_view",
+            description="Query the cached results of a materialized view (fast, no re-execution).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "View name"},
+                    "max_rows": {"type": "integer", "description": "Maximum rows", "default": 1000},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="refresh_materialized_view",
+            description="Refresh a materialized view by re-executing its SQL and updating the cached data.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "View name to refresh"},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="drop_materialized_view",
+            description="Drop a materialized view and its backing Iceberg table.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "View name to drop"},
+                },
+                "required": ["name"],
             },
         ),
     ]
@@ -2895,6 +2948,70 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Search failed: {str(e)}")]
+
+        elif name == "create_materialized_view":
+            try:
+                mv_name = arguments.get("name")
+                sql = arguments.get("sql")
+                desc = arguments.get("description", "")
+                if not mv_name or not sql:
+                    return [TextContent(type="text", text="Error: 'name' and 'sql' are required")]
+                catalog = get_catalog()
+                engine = get_engine()
+                result = create_materialized_view(mv_name, sql, engine, catalog, description=desc)
+                return [TextContent(type="text", text=f"**{result['message']}**\n\nBacking table: {result['backing_table']}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Create materialized view failed: {str(e)}")]
+
+        elif name == "list_materialized_views":
+            try:
+                views = list_materialized_views()
+                if not views:
+                    return [TextContent(type="text", text="No materialized views.")]
+                lines = [f"**Materialized Views ({len(views)}):**\n"]
+                for v in views:
+                    lines.append(f"- **{v['name']}** ({v['row_count']} rows, refreshed {v['last_refreshed'][:19]})")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List materialized views failed: {str(e)}")]
+
+        elif name == "query_materialized_view":
+            try:
+                mv_name = arguments.get("name")
+                max_rows = arguments.get("max_rows", 1000)
+                if not mv_name:
+                    return [TextContent(type="text", text="Error: 'name' is required")]
+                engine = get_engine()
+                df = query_materialized_view(mv_name, engine, max_rows=max_rows)
+                if df.empty:
+                    return [TextContent(type="text", text="View returned no results.")]
+                markdown = df.to_markdown(index=False)
+                return [TextContent(type="text", text=f"**{mv_name} ({len(df)} rows):**\n\n{markdown}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Query materialized view failed: {str(e)}")]
+
+        elif name == "refresh_materialized_view":
+            try:
+                mv_name = arguments.get("name")
+                if not mv_name:
+                    return [TextContent(type="text", text="Error: 'name' is required")]
+                catalog = get_catalog()
+                engine = get_engine()
+                result = refresh_materialized_view(mv_name, engine, catalog)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Refresh materialized view failed: {str(e)}")]
+
+        elif name == "drop_materialized_view":
+            try:
+                mv_name = arguments.get("name")
+                if not mv_name:
+                    return [TextContent(type="text", text="Error: 'name' is required")]
+                catalog = get_catalog()
+                result = drop_materialized_view(mv_name, catalog)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Drop materialized view failed: {str(e)}")]
 
         elif name == "execute_join":
             try:
