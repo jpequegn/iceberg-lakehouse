@@ -4462,6 +4462,129 @@ def cdc_export(table_name: str, from_snap: str, to_snap: str, fmt: str, output: 
         console.print(data)
 
 
+@main.group()
+def dedup():
+    """Data deduplication commands."""
+    pass
+
+
+@dedup.command("find")
+@click.argument("table_name")
+@click.option("--keys", default=None, help="Comma-separated key columns")
+@click.option("--limit", "-n", default=100, help="Max duplicate groups")
+def dedup_find(table_name: str, keys: str, limit: int):
+    """Find duplicate rows in a table.
+
+    Examples:
+        lakehouse dedup find expenses --keys id
+    """
+    from .catalog import get_catalog
+    from .dedup import find_duplicates
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    result = find_duplicates(catalog, table_name, key_columns=key_columns, limit=limit)
+
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    if result["duplicates"]:
+        table = Table(title="Duplicate Groups")
+        for col in result["key_columns"]:
+            table.add_column(col, style="cyan")
+        table.add_column("Count", style="red")
+        for d in result["duplicates"]:
+            row = [str(d.get(c, "")) for c in result["key_columns"]] + [str(d["_dup_count"])]
+            table.add_row(*row)
+        console.print(table)
+
+
+@dedup.command("summary")
+@click.argument("table_name")
+@click.option("--keys", default=None, help="Comma-separated key columns")
+def dedup_summary_cmd(table_name: str, keys: str):
+    """Show deduplication summary.
+
+    Examples:
+        lakehouse dedup summary expenses --keys id
+    """
+    from .catalog import get_catalog
+    from .dedup import dedup_summary
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    result = dedup_summary(catalog, table_name, key_columns=key_columns)
+
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    table = Table(title="Dedup Summary")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Total Rows", str(result["total_rows"]))
+    table.add_row("Unique Rows", str(result["unique_rows"]))
+    table.add_row("Duplicate Rows", str(result["duplicate_rows"]))
+    table.add_row("Duplicate %", f"{result['duplicate_pct']:.1f}%")
+    console.print(table)
+
+
+@dedup.command("remove")
+@click.argument("table_name")
+@click.option("--keys", default=None, help="Comma-separated key columns")
+@click.option("--keep", default="first", type=click.Choice(["first", "last"]), help="Keep first or last occurrence")
+@click.option("--dry-run/--no-dry-run", default=True, help="Preview changes without applying")
+def dedup_remove(table_name: str, keys: str, keep: str, dry_run: bool):
+    """Remove duplicate rows.
+
+    Examples:
+        lakehouse dedup remove expenses --keys id --dry-run
+        lakehouse dedup remove expenses --keys id --no-dry-run --keep first
+    """
+    from .catalog import get_catalog
+    from .dedup import remove_duplicates
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    result = remove_duplicates(catalog, table_name, key_columns=key_columns, keep=keep, dry_run=dry_run)
+
+    style = "yellow" if dry_run else "green"
+    console.print(f"[{style}]{result['message']}[/{style}]")
+
+
+@dedup.command("report")
+@click.argument("table_name")
+@click.option("--keys", default=None, help="Comma-separated key columns")
+def dedup_report_cmd(table_name: str, keys: str):
+    """Generate comprehensive dedup report.
+
+    Examples:
+        lakehouse dedup report expenses --keys id
+    """
+    from .catalog import get_catalog
+    from .dedup import dedup_report
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    result = dedup_report(catalog, table_name, key_columns=key_columns)
+
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    table = Table(title="Column Uniqueness Analysis")
+    table.add_column("Column", style="cyan")
+    table.add_column("Unique Values", style="green")
+    table.add_column("Uniqueness %", style="yellow")
+    table.add_column("Good Key?", style="bold")
+    for col in result["column_analysis"]:
+        table.add_row(
+            col["column"],
+            str(col["unique_values"]),
+            f"{col['uniqueness_pct']:.1f}%",
+            "[green]Yes[/green]" if col["good_dedup_key"] else "[red]No[/red]",
+        )
+    console.print(table)
+
+    if result["suggested_keys"]:
+        console.print(f"\n[bold]Suggested dedup keys:[/bold] {', '.join(result['suggested_keys'])}")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
