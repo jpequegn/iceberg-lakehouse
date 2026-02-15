@@ -3993,6 +3993,202 @@ def sla_history(table_name: str):
     console.print(table)
 
 
+@main.group()
+def optimize():
+    """Query optimization advisor commands."""
+    pass
+
+
+@optimize.command("patterns")
+@click.option("--limit", "-n", default=100, help="Max history entries to analyze")
+def optimize_patterns(limit: int):
+    """Analyze query patterns from history.
+
+    Examples:
+        lakehouse optimize patterns
+        lakehouse optimize patterns --limit 50
+    """
+    from .optimizer import analyze_query_patterns
+
+    result = analyze_query_patterns(limit=limit)
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    if result["frequent_tables"]:
+        table = Table(title="Frequent Tables")
+        table.add_column("Table", style="cyan")
+        table.add_column("Queries", style="green")
+        for t in result["frequent_tables"]:
+            table.add_row(t["table"], str(t["count"]))
+        console.print(table)
+
+    if result["frequent_filters"]:
+        table = Table(title="Frequent Filter Columns")
+        table.add_column("Column", style="cyan")
+        table.add_column("Used", style="green")
+        for f in result["frequent_filters"]:
+            table.add_row(f["column"], str(f["count"]))
+        console.print(table)
+
+    if result["repeated_queries"]:
+        table = Table(title="Repeated Queries")
+        table.add_column("SQL Pattern", style="yellow", max_width=60)
+        table.add_column("Count", style="green")
+        for rq in result["repeated_queries"]:
+            table.add_row(rq["sql_pattern"][:60], str(rq["count"]))
+        console.print(table)
+
+    if result["slow_queries"]:
+        table = Table(title="Slow Queries (>p90)")
+        table.add_column("SQL", style="red", max_width=60)
+        table.add_column("Duration (ms)", style="yellow")
+        for sq in result["slow_queries"]:
+            table.add_row(sq["sql"][:60], str(sq["duration_ms"]))
+        console.print(table)
+
+
+@optimize.command("partitions")
+@click.argument("table_name")
+def optimize_partitions(table_name: str):
+    """Suggest partitioning strategies for a table.
+
+    Examples:
+        lakehouse optimize partitions expenses
+    """
+    from .catalog import get_catalog
+    from .optimizer import suggest_partitions
+
+    catalog = get_catalog()
+    suggestions = suggest_partitions(catalog, table_name)
+
+    if not suggestions:
+        console.print("[dim]No partition suggestions for this table.[/dim]")
+        return
+
+    table = Table(title=f"Partition Suggestions for '{table_name}'")
+    table.add_column("Column", style="cyan")
+    table.add_column("Unique Values", style="green")
+    table.add_column("Filter Frequency", style="yellow")
+    table.add_column("Benefit", style="bold")
+    table.add_column("Rationale", max_width=50)
+    for s in suggestions:
+        benefit_style = {"high": "green", "medium": "yellow", "low": "red"}.get(s["benefit"], "white")
+        table.add_row(
+            s["column"],
+            str(s["unique_values"]),
+            str(s["filter_frequency"]),
+            f"[{benefit_style}]{s['benefit']}[/{benefit_style}]",
+            s["rationale"],
+        )
+    console.print(table)
+
+
+@optimize.command("materializations")
+@click.option("--limit", "-n", default=100, help="Max history entries to analyze")
+def optimize_materializations(limit: int):
+    """Suggest materialized views based on repeated expensive queries.
+
+    Examples:
+        lakehouse optimize materializations
+    """
+    from .catalog import get_catalog
+    from .optimizer import suggest_materializations
+
+    catalog = get_catalog()
+    suggestions = suggest_materializations(catalog, limit=limit)
+
+    if not suggestions:
+        console.print("[dim]No materialization suggestions.[/dim]")
+        return
+
+    table = Table(title="Materialization Suggestions")
+    table.add_column("SQL Pattern", style="yellow", max_width=60)
+    table.add_column("Run Count", style="green")
+    table.add_column("Has Agg", style="cyan")
+    table.add_column("Has Join", style="cyan")
+    for s in suggestions:
+        table.add_row(
+            s["sql"][:60],
+            str(s["run_count"]),
+            "Yes" if s["has_aggregation"] else "No",
+            "Yes" if s["has_join"] else "No",
+        )
+    console.print(table)
+
+
+@optimize.command("report")
+def optimize_report():
+    """Generate a comprehensive optimization report.
+
+    Examples:
+        lakehouse optimize report
+    """
+    from .catalog import get_catalog
+    from .optimizer import get_optimization_report
+
+    catalog = get_catalog()
+    result = get_optimization_report(catalog)
+
+    score = result["optimization_score"]
+    score_style = "green" if score >= 80 else "yellow" if score >= 50 else "red"
+    console.print(Panel(
+        f"[{score_style} bold]{score}/100[/{score_style} bold]",
+        title="Optimization Score",
+    ))
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    if result["partition_suggestions"]:
+        console.print(f"[yellow]Partition suggestions: {len(result['partition_suggestions'])}[/yellow]")
+        for s in result["partition_suggestions"]:
+            console.print(f"  • {s['rationale']}")
+
+    if result["materialization_suggestions"]:
+        console.print(f"[yellow]Materialization suggestions: {len(result['materialization_suggestions'])}[/yellow]")
+        for s in result["materialization_suggestions"]:
+            console.print(f"  • {s['rationale']}")
+
+    if result["slow_queries"]:
+        console.print(f"[red]Slow queries: {len(result['slow_queries'])}[/red]")
+        for sq in result["slow_queries"]:
+            console.print(f"  • {sq['sql'][:80]} ({sq['duration_ms']}ms)")
+
+
+@optimize.command("cost")
+@click.argument("sql")
+def optimize_cost(sql: str):
+    """Estimate the cost of a SQL query.
+
+    Examples:
+        lakehouse optimize cost "SELECT * FROM expenses WHERE amount > 100"
+    """
+    from .catalog import get_catalog
+    from .optimizer import estimate_query_cost
+
+    catalog = get_catalog()
+    result = estimate_query_cost(catalog, sql)
+
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    table = Table(title="Query Cost Estimate")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Complexity", result["complexity"])
+    table.add_row("Estimated Rows Scanned", f"{result['estimated_rows_scanned']:,}")
+    table.add_row("Total Source Rows", f"{result['total_source_rows']:,}")
+    table.add_row("Has Filter", "Yes" if result["has_filter"] else "No")
+    table.add_row("Has Join", "Yes" if result["has_join"] else "No")
+    table.add_row("Has Aggregation", "Yes" if result["has_aggregation"] else "No")
+    console.print(table)
+
+    if result["tables_involved"]:
+        t2 = Table(title="Tables Involved")
+        t2.add_column("Table", style="cyan")
+        t2.add_column("Estimated Rows", style="green")
+        t2.add_column("Size (bytes)", style="yellow")
+        for td in result["tables_involved"]:
+            t2.add_row(td["table"], f"{td['estimated_rows']:,}", f"{td['size_bytes']:,}")
+        console.print(t2)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

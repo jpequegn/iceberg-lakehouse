@@ -1350,6 +1350,45 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="analyze_query_patterns",
+            description="Analyze recent query history to find patterns: frequent tables, frequent filter columns, slow queries, and repeated queries.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max history entries to analyze (default: 100)"},
+                },
+            },
+        ),
+        Tool(
+            name="suggest_optimizations",
+            description="Suggest partition strategies and materialized views based on query patterns and data distribution.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name for partition suggestions (optional, omit for materialization suggestions only)"},
+                },
+            },
+        ),
+        Tool(
+            name="optimization_report",
+            description="Generate a comprehensive optimization report with score, partition suggestions, materialization suggestions, and slow queries.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="estimate_query_cost",
+            description="Estimate the cost of a SQL query based on table sizes, filters, joins, and aggregations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "SQL query to estimate cost for"},
+                },
+                "required": ["sql"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -3974,6 +4013,106 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"SLA check failed: {str(e)}")]
+
+        elif name == "analyze_query_patterns":
+            from .optimizer import analyze_query_patterns as _analyze_patterns
+            try:
+                result = _analyze_patterns(limit=arguments.get("limit", 100))
+                lines = [f"## Query Pattern Analysis\n", f"{result['message']}\n"]
+                if result["frequent_tables"]:
+                    lines.append("### Frequent Tables")
+                    for t in result["frequent_tables"]:
+                        lines.append(f"- **{t['table']}**: {t['count']} queries")
+                if result["frequent_filters"]:
+                    lines.append("\n### Frequent Filter Columns")
+                    for f in result["frequent_filters"]:
+                        lines.append(f"- **{f['column']}**: used {f['count']} times")
+                if result["repeated_queries"]:
+                    lines.append("\n### Repeated Queries")
+                    for rq in result["repeated_queries"]:
+                        lines.append(f"- `{rq['sql_pattern'][:80]}` — {rq['count']} times")
+                if result["slow_queries"]:
+                    lines.append("\n### Slow Queries (>p90)")
+                    for sq in result["slow_queries"]:
+                        lines.append(f"- `{sq['sql'][:80]}` — {sq['duration_ms']}ms")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Query pattern analysis failed: {str(e)}")]
+
+        elif name == "suggest_optimizations":
+            from .optimizer import suggest_partitions as _suggest_part, suggest_materializations as _suggest_mat
+            try:
+                catalog = get_catalog()
+                lines = ["## Optimization Suggestions\n"]
+                table_name = arguments.get("table_name")
+                if table_name:
+                    partitions = _suggest_part(catalog, table_name)
+                    if partitions:
+                        lines.append(f"### Partition Suggestions for '{table_name}'")
+                        for s in partitions:
+                            lines.append(f"- **{s['column']}**: {s['rationale']} (benefit: {s['benefit']})")
+                    else:
+                        lines.append(f"No partition suggestions for '{table_name}'.")
+                mats = _suggest_mat(catalog)
+                if mats:
+                    lines.append("\n### Materialization Suggestions")
+                    for s in mats:
+                        lines.append(f"- `{s['sql'][:80]}` — run {s['run_count']} times ({s['rationale']})")
+                elif not table_name:
+                    lines.append("No materialization suggestions.")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Optimization suggestions failed: {str(e)}")]
+
+        elif name == "optimization_report":
+            from .optimizer import get_optimization_report as _get_report
+            try:
+                catalog = get_catalog()
+                result = _get_report(catalog)
+                lines = [
+                    f"## Optimization Report\n",
+                    f"**Score:** {result['optimization_score']}/100",
+                    f"{result['message']}\n",
+                ]
+                if result["partition_suggestions"]:
+                    lines.append("### Partition Suggestions")
+                    for s in result["partition_suggestions"]:
+                        lines.append(f"- {s['rationale']}")
+                if result["materialization_suggestions"]:
+                    lines.append("\n### Materialization Suggestions")
+                    for s in result["materialization_suggestions"]:
+                        lines.append(f"- {s['rationale']}")
+                if result["slow_queries"]:
+                    lines.append("\n### Slow Queries")
+                    for sq in result["slow_queries"]:
+                        lines.append(f"- `{sq['sql'][:80]}` — {sq['duration_ms']}ms")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Optimization report failed: {str(e)}")]
+
+        elif name == "estimate_query_cost":
+            from .optimizer import estimate_query_cost as _estimate_cost
+            try:
+                catalog = get_catalog()
+                sql = arguments.get("sql", "")
+                result = _estimate_cost(catalog, sql)
+                lines = [
+                    f"## Query Cost Estimate\n",
+                    f"{result['message']}\n",
+                    f"- **Complexity:** {result['complexity']}",
+                    f"- **Estimated rows scanned:** {result['estimated_rows_scanned']:,}",
+                    f"- **Total source rows:** {result['total_source_rows']:,}",
+                    f"- **Has filter:** {'Yes' if result['has_filter'] else 'No'}",
+                    f"- **Has join:** {'Yes' if result['has_join'] else 'No'}",
+                    f"- **Has aggregation:** {'Yes' if result['has_aggregation'] else 'No'}",
+                ]
+                if result["tables_involved"]:
+                    lines.append("\n### Tables Involved")
+                    for td in result["tables_involved"]:
+                        lines.append(f"- **{td['table']}**: ~{td['estimated_rows']:,} rows, {td['size_bytes']:,} bytes")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Cost estimation failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
