@@ -1539,6 +1539,53 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="register_notification",
+            description="Register an event notification handler for a table. Handler types: webhook (sends HTTP POST), shell (runs command), log (appends to file). Event types: write, schema_change, sla_violation, maintenance, all.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name (use '*' for all tables)"},
+                    "event_type": {"type": "string", "enum": ["write", "schema_change", "sla_violation", "maintenance", "all"], "description": "Event type to listen for"},
+                    "handler_type": {"type": "string", "enum": ["webhook", "shell", "log"], "description": "Handler type"},
+                    "config": {"type": "object", "description": "Handler config: {url} for webhook, {command} for shell, {file} for log"},
+                },
+                "required": ["table_name", "event_type", "handler_type", "config"],
+            },
+        ),
+        Tool(
+            name="list_notifications",
+            description="List registered notification handlers, optionally filtered by table name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Filter by table name (optional)"},
+                },
+            },
+        ),
+        Tool(
+            name="remove_notification",
+            description="Remove a registered notification handler by its ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "handler_id": {"type": "string", "description": "Handler ID to remove"},
+                },
+                "required": ["handler_id"],
+            },
+        ),
+        Tool(
+            name="get_notification_history",
+            description="Get history of fired notification events, optionally filtered by table and event type.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Filter by table name"},
+                    "event_type": {"type": "string", "description": "Filter by event type"},
+                    "limit": {"type": "integer", "description": "Max entries (default: 50)"},
+                },
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -4470,6 +4517,47 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=output)]
             except Exception as e:
                 return [TextContent(type="text", text=f"Export changes failed: {str(e)}")]
+
+        elif name == "register_notification":
+            try:
+                from .notifications import register_handler
+                result = register_handler(
+                    table_name=arguments["table_name"],
+                    event_type=arguments["event_type"],
+                    handler_type=arguments["handler_type"],
+                    config=arguments["config"],
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Register notification failed: {str(e)}")]
+
+        elif name == "list_notifications":
+            try:
+                from .notifications import list_handlers
+                result = list_handlers(table_name=arguments.get("table_name"))
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List notifications failed: {str(e)}")]
+
+        elif name == "remove_notification":
+            try:
+                from .notifications import remove_handler
+                result = remove_handler(handler_id=arguments["handler_id"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Remove notification failed: {str(e)}")]
+
+        elif name == "get_notification_history":
+            try:
+                from .notifications import get_event_history
+                result = get_event_history(
+                    table_name=arguments.get("table_name"),
+                    event_type=arguments.get("event_type"),
+                    limit=arguments.get("limit", 50),
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get notification history failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
