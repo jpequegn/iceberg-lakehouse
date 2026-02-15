@@ -2991,6 +2991,148 @@ def pipeline_drop(name: str):
         raise click.Abort()
 
 
+# --- Quality commands ---
+
+
+@main.group("quality")
+def quality_group():
+    """Data quality scoring and anomaly detection."""
+    pass
+
+
+@quality_group.command("score")
+@click.argument("table_name")
+def quality_score(table_name: str):
+    """Compute quality score for a table."""
+    try:
+        from lakehouse.quality import compute_quality_score
+        from lakehouse.catalog import get_catalog
+        catalog = get_catalog()
+        result = compute_quality_score(catalog, table_name)
+
+        console.print(f"\n[bold cyan]Quality Score: {result['overall_score']}/100[/bold cyan]")
+        table = Table(title=f"Score Breakdown — {result['table']}")
+        table.add_column("Component", style="cyan")
+        table.add_column("Score", justify="right")
+        table.add_column("Weight", justify="right")
+        table.add_row("Completeness", f"{result['completeness']}", "30%")
+        table.add_row("Uniqueness", f"{result['uniqueness']}", "25%")
+        table.add_row("Freshness", f"{result['freshness']}", "20%")
+        table.add_row("Rule Compliance", f"{result['rule_compliance']}", "25%")
+        table.add_row("[bold]Overall[/bold]", f"[bold]{result['overall_score']}[/bold]", "[bold]100%[/bold]")
+        console.print(table)
+
+        if result["recommendations"]:
+            console.print("\n[bold yellow]Recommendations:[/bold yellow]")
+            for r in result["recommendations"]:
+                console.print(f"  • {r}")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@quality_group.command("anomalies")
+@click.argument("table_name")
+def quality_anomalies(table_name: str):
+    """Detect data anomalies for a table."""
+    try:
+        from lakehouse.quality import detect_anomalies
+        from lakehouse.catalog import get_catalog
+        catalog = get_catalog()
+        anomalies = detect_anomalies(catalog, table_name)
+
+        if not anomalies:
+            console.print("[bold green]✓ No anomalies detected.[/bold green]")
+            return
+
+        table = Table(title="Anomalies Detected")
+        table.add_column("Type", style="cyan")
+        table.add_column("Column")
+        table.add_column("Severity")
+        table.add_column("Description")
+        for a in anomalies:
+            sev_style = "red" if a["severity"] == "critical" else "yellow" if a["severity"] == "warning" else "dim"
+            table.add_row(
+                a["type"],
+                a.get("column") or "-",
+                f"[{sev_style}]{a['severity']}[/{sev_style}]",
+                a["description"],
+            )
+        console.print(table)
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@quality_group.command("report")
+@click.option("--json-output", "json_out", is_flag=True, help="Output as JSON")
+def quality_report(json_out: bool):
+    """Generate quality report for all tables."""
+    import json as _json
+    try:
+        from lakehouse.quality import get_quality_report
+        from lakehouse.catalog import get_catalog
+        catalog = get_catalog()
+        report = get_quality_report(catalog)
+
+        if json_out:
+            console.print(_json.dumps(report, indent=2, default=str))
+            return
+
+        console.print(f"\n[bold cyan]Quality Report — {report['total_tables']} table(s), avg score: {report['average_score']}/100[/bold cyan]\n")
+        table = Table(title="Table Quality Scores")
+        table.add_column("Table", style="cyan")
+        table.add_column("Score", justify="right")
+        table.add_column("Complete", justify="right")
+        table.add_column("Unique", justify="right")
+        table.add_column("Fresh", justify="right")
+        table.add_column("Rules", justify="right")
+        table.add_column("Anomalies", justify="right")
+        for t in report["tables"]:
+            if t.get("overall_score") is not None:
+                table.add_row(
+                    t["table"], str(t["overall_score"]),
+                    str(t["completeness"]), str(t["uniqueness"]),
+                    str(t["freshness"]), str(t["rule_compliance"]),
+                    str(t["anomalies"]),
+                )
+            else:
+                table.add_row(t["table"], "[red]error[/red]", "-", "-", "-", "-", "-")
+        console.print(table)
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@quality_group.command("history")
+@click.argument("table_name")
+def quality_history(table_name: str):
+    """Show quality score history for a table."""
+    from lakehouse.quality import get_quality_history
+    history = get_quality_history(table_name)
+    if not history:
+        console.print("[dim]No quality history for this table.[/dim]")
+        return
+
+    table = Table(title=f"Quality History — {table_name}")
+    table.add_column("Date", style="cyan")
+    table.add_column("Score", justify="right")
+    table.add_column("Complete", justify="right")
+    table.add_column("Unique", justify="right")
+    table.add_column("Fresh", justify="right")
+    table.add_column("Rules", justify="right")
+    for h in history:
+        table.add_row(
+            h["computed_at"][:19],
+            str(h["overall_score"]),
+            str(h["completeness"]),
+            str(h["uniqueness"]),
+            str(h["freshness"]),
+            str(h["rule_compliance"]),
+        )
+    console.print(table)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

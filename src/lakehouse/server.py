@@ -1443,6 +1443,33 @@ async def list_tools() -> list[Tool]:
                 "required": ["name"],
             },
         ),
+        Tool(
+            name="quality_score",
+            description="Compute a data quality score (0-100) for a table based on completeness, uniqueness, freshness, and rule compliance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table to score"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="detect_anomalies",
+            description="Detect data anomalies by comparing current data with cached statistics (row count changes, NULL spikes, value drift).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table to check for anomalies"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="quality_report",
+            description="Generate a quality report for all tables with scores, anomalies, and recommendations.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -3273,6 +3300,70 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"**{result['message']}**")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Drop pipeline failed: {str(e)}")]
+
+        elif name == "quality_score":
+            try:
+                from .quality import compute_quality_score
+                tbl = arguments.get("table_name")
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+                catalog = get_catalog()
+                result = compute_quality_score(catalog, tbl)
+                lines = [
+                    f"**{result['message']}**\n",
+                    f"| Component | Score |",
+                    f"|-----------|-------|",
+                    f"| Completeness (30%) | {result['completeness']} |",
+                    f"| Uniqueness (25%) | {result['uniqueness']} |",
+                    f"| Freshness (20%) | {result['freshness']} |",
+                    f"| Rule Compliance (25%) | {result['rule_compliance']} |",
+                    f"| **Overall** | **{result['overall_score']}** |",
+                ]
+                if result["recommendations"]:
+                    lines.append("\n**Recommendations:**")
+                    for r in result["recommendations"]:
+                        lines.append(f"- {r}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Quality score failed: {str(e)}")]
+
+        elif name == "detect_anomalies":
+            try:
+                from .quality import detect_anomalies
+                tbl = arguments.get("table_name")
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+                catalog = get_catalog()
+                anomalies = detect_anomalies(catalog, tbl)
+                if not anomalies:
+                    return [TextContent(type="text", text=f"No anomalies detected for {tbl}.")]
+                lines = [f"**Anomalies for {tbl} ({len(anomalies)}):**\n"]
+                for a in anomalies:
+                    col = f" in `{a['column']}`" if a.get("column") else ""
+                    lines.append(f"- **{a['severity']}** {a['type']}{col}: {a['description']}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Detect anomalies failed: {str(e)}")]
+
+        elif name == "quality_report":
+            try:
+                from .quality import get_quality_report
+                catalog = get_catalog()
+                report = get_quality_report(catalog)
+                lines = [f"**Quality Report ({report['total_tables']} tables, avg score: {report['average_score']}):**\n"]
+                lines.append("| Table | Score | Complete | Unique | Fresh | Rules | Anomalies |")
+                lines.append("|-------|-------|----------|--------|-------|-------|-----------|")
+                for t in report["tables"]:
+                    if t.get("overall_score") is not None:
+                        lines.append(
+                            f"| {t['table']} | {t['overall_score']} | {t['completeness']} | "
+                            f"{t['uniqueness']} | {t['freshness']} | {t['rule_compliance']} | {t['anomalies']} |"
+                        )
+                    else:
+                        lines.append(f"| {t['table']} | error | - | - | - | - | - |")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Quality report failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
