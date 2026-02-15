@@ -1389,6 +1389,62 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_table_changes",
+            description="Get row-level changes (INSERT, UPDATE, DELETE) between two snapshots of a table. Detects updates when key columns match but values differ.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "from_snapshot": {"type": "string", "description": "From snapshot ID (optional, defaults to second-to-last)"},
+                    "to_snapshot": {"type": "string", "description": "To snapshot ID (optional, defaults to current)"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns for update detection (optional, defaults to first column)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="get_change_log",
+            description="Get a chronological log of row-level changes across all snapshots of a table.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "limit": {"type": "integer", "description": "Max entries (default: 100)"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns for update detection"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="get_change_summary",
+            description="Get summary statistics for changes between two snapshots: insert/update/delete counts, affected columns.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "from_snapshot": {"type": "string", "description": "From snapshot ID"},
+                    "to_snapshot": {"type": "string", "description": "To snapshot ID"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns for update detection"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="export_changes",
+            description="Export row-level changes between two snapshots to JSON or CSV format.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "from_snapshot": {"type": "string", "description": "From snapshot ID"},
+                    "to_snapshot": {"type": "string", "description": "To snapshot ID"},
+                    "format": {"type": "string", "enum": ["json", "csv"], "description": "Export format (default: json)"},
+                    "key_columns": {"type": "array", "items": {"type": "string"}, "description": "Key columns for update detection"},
+                },
+                "required": ["table_name", "from_snapshot", "to_snapshot"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -4113,6 +4169,95 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Cost estimation failed: {str(e)}")]
+
+        elif name == "get_table_changes":
+            from .cdc import get_changes as _get_changes
+            try:
+                catalog = get_catalog()
+                result = _get_changes(
+                    catalog,
+                    arguments["table_name"],
+                    from_snapshot=arguments.get("from_snapshot"),
+                    to_snapshot=arguments.get("to_snapshot"),
+                    key_columns=arguments.get("key_columns"),
+                )
+                lines = [f"## Changes: {result['message']}\n"]
+                s = result["summary"]
+                lines.append(f"**Inserts:** {s['inserts']} | **Updates:** {s['updates']} | **Deletes:** {s['deletes']}\n")
+                for c in result["changes"][:50]:
+                    if c["type"] == "INSERT":
+                        lines.append(f"- **INSERT**: {c['row']}")
+                    elif c["type"] == "DELETE":
+                        lines.append(f"- **DELETE**: {c['row']}")
+                    elif c["type"] == "UPDATE":
+                        lines.append(f"- **UPDATE** (key={c.get('key', {})}): changed {c.get('changed_columns', [])}")
+                if len(result["changes"]) > 50:
+                    lines.append(f"\n*... and {len(result['changes']) - 50} more*")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get changes failed: {str(e)}")]
+
+        elif name == "get_change_log":
+            from .cdc import get_change_log as _get_change_log
+            try:
+                catalog = get_catalog()
+                log = _get_change_log(
+                    catalog,
+                    arguments["table_name"],
+                    limit=arguments.get("limit", 100),
+                    key_columns=arguments.get("key_columns"),
+                )
+                if not log:
+                    return [TextContent(type="text", text="No change history available.")]
+                lines = [f"## Change Log ({len(log)} entries)\n"]
+                lines.append("| Timestamp | Operation | Inserts | Updates | Deletes | Total |")
+                lines.append("|-----------|-----------|---------|---------|---------|-------|")
+                for entry in log:
+                    s = entry["summary"]
+                    lines.append(f"| {entry['timestamp'][:19]} | {entry.get('operation', '')} | {s['inserts']} | {s['updates']} | {s['deletes']} | {entry['change_count']} |")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get change log failed: {str(e)}")]
+
+        elif name == "get_change_summary":
+            from .cdc import get_change_summary as _get_summary
+            try:
+                catalog = get_catalog()
+                result = _get_summary(
+                    catalog,
+                    arguments["table_name"],
+                    from_snapshot=arguments.get("from_snapshot"),
+                    to_snapshot=arguments.get("to_snapshot"),
+                    key_columns=arguments.get("key_columns"),
+                )
+                lines = [
+                    f"## Change Summary\n",
+                    f"{result['message']}\n",
+                    f"- **Inserts:** {result['inserts']}",
+                    f"- **Updates:** {result['updates']}",
+                    f"- **Deletes:** {result['deletes']}",
+                    f"- **Total changes:** {result['total_changes']}",
+                    f"- **Affected columns:** {', '.join(result['affected_columns'])}",
+                ]
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Change summary failed: {str(e)}")]
+
+        elif name == "export_changes":
+            from .cdc import export_changes as _export_changes
+            try:
+                catalog = get_catalog()
+                output = _export_changes(
+                    catalog,
+                    arguments["table_name"],
+                    arguments["from_snapshot"],
+                    arguments["to_snapshot"],
+                    format=arguments.get("format", "json"),
+                    key_columns=arguments.get("key_columns"),
+                )
+                return [TextContent(type="text", text=output)]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Export changes failed: {str(e)}")]
 
         elif name == "dashboard":
             try:

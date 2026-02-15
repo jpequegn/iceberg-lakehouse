@@ -4189,6 +4189,157 @@ def optimize_cost(sql: str):
         console.print(t2)
 
 
+@main.group()
+def cdc():
+    """Change data capture commands."""
+    pass
+
+
+@cdc.command("changes")
+@click.argument("table_name")
+@click.option("--from", "from_snap", default=None, help="From snapshot ID")
+@click.option("--to", "to_snap", default=None, help="To snapshot ID")
+@click.option("--keys", default=None, help="Comma-separated key columns for update detection")
+def cdc_changes(table_name: str, from_snap: str, to_snap: str, keys: str):
+    """Show row-level changes between snapshots.
+
+    Examples:
+        lakehouse cdc changes expenses
+        lakehouse cdc changes expenses --from 123 --to 456 --keys id
+    """
+    from .catalog import get_catalog
+    from .cdc import get_changes
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    result = get_changes(catalog, table_name, from_snapshot=from_snap, to_snapshot=to_snap, key_columns=key_columns)
+
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    if not result["changes"]:
+        console.print("[dim]No changes detected.[/dim]")
+        return
+
+    table = Table(title=f"Changes ({result['from_snapshot']} → {result['to_snapshot']})")
+    table.add_column("Type", style="bold")
+    table.add_column("Details", max_width=80)
+    for c in result["changes"][:50]:
+        if c["type"] == "INSERT":
+            style = "green"
+            details = str(c["row"])
+        elif c["type"] == "DELETE":
+            style = "red"
+            details = str(c["row"])
+        else:
+            style = "yellow"
+            details = f"key={c.get('key', {})} changed={c.get('changed_columns', [])}"
+        table.add_row(f"[{style}]{c['type']}[/{style}]", details[:80])
+    console.print(table)
+
+    s = result["summary"]
+    console.print(f"\n[green]+{s['inserts']} inserts[/green]  [yellow]~{s['updates']} updates[/yellow]  [red]-{s['deletes']} deletes[/red]")
+
+
+@cdc.command("log")
+@click.argument("table_name")
+@click.option("--limit", "-n", default=20, help="Max entries")
+@click.option("--keys", default=None, help="Comma-separated key columns")
+def cdc_log(table_name: str, limit: int, keys: str):
+    """Show change log across snapshots.
+
+    Examples:
+        lakehouse cdc log expenses --limit 10
+    """
+    from .catalog import get_catalog
+    from .cdc import get_change_log
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    log = get_change_log(catalog, table_name, limit=limit, key_columns=key_columns)
+
+    if not log:
+        console.print("[dim]No change history.[/dim]")
+        return
+
+    table = Table(title="Change Log")
+    table.add_column("Timestamp", style="cyan")
+    table.add_column("Operation", style="yellow")
+    table.add_column("Inserts", style="green")
+    table.add_column("Updates", style="yellow")
+    table.add_column("Deletes", style="red")
+    table.add_column("Total", style="bold")
+    for entry in log:
+        s = entry["summary"]
+        table.add_row(
+            entry["timestamp"][:19],
+            entry.get("operation", ""),
+            str(s["inserts"]),
+            str(s["updates"]),
+            str(s["deletes"]),
+            str(entry["change_count"]),
+        )
+    console.print(table)
+
+
+@cdc.command("summary")
+@click.argument("table_name")
+@click.option("--from", "from_snap", default=None, help="From snapshot ID")
+@click.option("--to", "to_snap", default=None, help="To snapshot ID")
+@click.option("--keys", default=None, help="Comma-separated key columns")
+def cdc_summary(table_name: str, from_snap: str, to_snap: str, keys: str):
+    """Show change summary between snapshots.
+
+    Examples:
+        lakehouse cdc summary expenses
+    """
+    from .catalog import get_catalog
+    from .cdc import get_change_summary
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    result = get_change_summary(catalog, table_name, from_snapshot=from_snap, to_snapshot=to_snap, key_columns=key_columns)
+
+    console.print(f"[bold]{result['message']}[/bold]\n")
+
+    table = Table(title="Change Summary")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Inserts", str(result["inserts"]))
+    table.add_row("Updates", str(result["updates"]))
+    table.add_row("Deletes", str(result["deletes"]))
+    table.add_row("Total Changes", str(result["total_changes"]))
+    table.add_row("Affected Columns", ", ".join(result["affected_columns"]))
+    console.print(table)
+
+
+@cdc.command("export")
+@click.argument("table_name")
+@click.option("--from", "from_snap", required=True, help="From snapshot ID")
+@click.option("--to", "to_snap", required=True, help="To snapshot ID")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "csv"]), help="Export format")
+@click.option("--output", "-o", default=None, help="Output file (default: stdout)")
+@click.option("--keys", default=None, help="Comma-separated key columns")
+def cdc_export(table_name: str, from_snap: str, to_snap: str, fmt: str, output: str, keys: str):
+    """Export changes to JSON or CSV.
+
+    Examples:
+        lakehouse cdc export expenses --from 123 --to 456 --format json -o changes.json
+    """
+    from .catalog import get_catalog
+    from .cdc import export_changes
+
+    catalog = get_catalog()
+    key_columns = [k.strip() for k in keys.split(",")] if keys else None
+    data = export_changes(catalog, table_name, from_snap, to_snap, format=fmt, key_columns=key_columns)
+
+    if output:
+        from pathlib import Path
+        Path(output).write_text(data)
+        console.print(f"[green]Exported to {output}[/green]")
+    else:
+        console.print(data)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
