@@ -1586,6 +1586,47 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_cache_stats",
+            description="Get query result cache statistics: total entries, hits, misses, and hit rate.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="list_cached_queries",
+            description="List cached query results with TTL remaining, hit count, and source tables.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max entries (default: 20)"},
+                },
+            },
+        ),
+        Tool(
+            name="invalidate_cache",
+            description="Clear query cache entries. Specify table_name to clear only that table's entries, or omit to clear all.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name to invalidate (optional, clears all if omitted)"},
+                },
+            },
+        ),
+        Tool(
+            name="set_cache_policy",
+            description="Set per-table caching policy with custom TTL or disable caching for a specific table.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "ttl_seconds": {"type": "integer", "description": "Cache TTL in seconds"},
+                    "enabled": {"type": "boolean", "description": "Enable/disable caching (default: true)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -4558,6 +4599,42 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get notification history failed: {str(e)}")]
+
+        elif name == "get_cache_stats":
+            try:
+                from .query_cache import get_cache_stats
+                result = get_cache_stats()
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get cache stats failed: {str(e)}")]
+
+        elif name == "list_cached_queries":
+            try:
+                from .query_cache import list_cached_queries
+                result = list_cached_queries(limit=arguments.get("limit", 20))
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List cached queries failed: {str(e)}")]
+
+        elif name == "invalidate_cache":
+            try:
+                from .query_cache import invalidate
+                result = invalidate(table_name=arguments.get("table_name"))
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Invalidate cache failed: {str(e)}")]
+
+        elif name == "set_cache_policy":
+            try:
+                from .query_cache import set_cache_policy
+                result = set_cache_policy(
+                    table_name=arguments["table_name"],
+                    ttl_seconds=arguments.get("ttl_seconds"),
+                    enabled=arguments.get("enabled", True),
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Set cache policy failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
