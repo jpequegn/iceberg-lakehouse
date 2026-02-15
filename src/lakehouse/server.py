@@ -1317,6 +1317,39 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="set_sla",
+            description="Define SLA thresholds for a table (staleness, quality, row count, null percentage).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "max_staleness_hours": {"type": "number", "description": "Max hours since last modification"},
+                    "min_quality_score": {"type": "number", "description": "Min quality score 0-100"},
+                    "min_row_count": {"type": "integer", "description": "Minimum row count"},
+                    "max_null_pct": {"type": "number", "description": "Max null percentage per column"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="list_slas",
+            description="List all SLA definitions.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="check_sla",
+            description="Check SLA compliance for one or all tables. Returns violations and recommendations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name (optional, omit for all)"},
+                },
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -3891,6 +3924,56 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Incremental pipeline failed: {str(e)}")]
+
+        elif name == "set_sla":
+            from .sla import set_sla as _set_sla
+            try:
+                sla_def = {}
+                for key in ("max_staleness_hours", "min_quality_score", "min_row_count", "max_null_pct"):
+                    if key in arguments:
+                        sla_def[key] = arguments[key]
+                result = _set_sla(arguments["table_name"], sla_def)
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Set SLA failed: {str(e)}")]
+
+        elif name == "list_slas":
+            from .sla import list_slas as _list_slas
+            try:
+                slas = _list_slas()
+                if not slas:
+                    return [TextContent(type="text", text="No SLAs configured.")]
+                lines = ["## SLA Definitions\n"]
+                lines.append("| Table | Max Staleness | Min Quality | Min Rows | Max Null % |")
+                lines.append("|-------|---------------|-------------|----------|------------|")
+                for s in slas:
+                    lines.append(
+                        f"| {s['table']} | {s.get('max_staleness_hours') or '-'} | "
+                        f"{s.get('min_quality_score') or '-'} | {s.get('min_row_count') if s.get('min_row_count') is not None else '-'} | "
+                        f"{s.get('max_null_pct') if s.get('max_null_pct') is not None else '-'} |"
+                    )
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List SLAs failed: {str(e)}")]
+
+        elif name == "check_sla":
+            from .sla import check_sla as _check_sla
+            try:
+                catalog = get_catalog()
+                result = _check_sla(catalog, table_name=arguments.get("table_name"))
+                lines = [f"## SLA Check: {result['message']}\n"]
+                for t in result["tables"]:
+                    status = t["status"].upper()
+                    lines.append(f"### {t['table']}: {status}")
+                    for v in t.get("violations", []):
+                        lines.append(f"- **VIOLATION**: {v}")
+                    for w in t.get("warnings", []):
+                        lines.append(f"- WARNING: {w}")
+                    for r in t.get("recommendations", []):
+                        lines.append(f"- *Recommendation*: {r}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"SLA check failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
