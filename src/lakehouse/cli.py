@@ -3615,6 +3615,125 @@ def catalog_enriched_schema(table_name: str):
                   f"{result['classified_fields']}/{result['total_fields']} classified")
 
 
+@main.group()
+def mask():
+    """Data masking policy commands."""
+    pass
+
+
+@mask.command("add")
+@click.argument("table_name")
+@click.argument("column_name")
+@click.argument("strategy")
+@click.option("--replacement", default=None, help="Replacement text for redact strategy")
+@click.option("--length", type=int, default=None, help="Keep first N chars for truncate strategy")
+@click.option("--sql", "sql_expr", default=None, help="SQL expression for expression strategy")
+def mask_add(table_name: str, column_name: str, strategy: str, replacement: str, length: int, sql_expr: str):
+    """Add a masking policy to a column.
+
+    Examples:
+        lakehouse mask add users email hash
+        lakehouse mask add users name redact --replacement "***"
+        lakehouse mask add users ssn truncate --length 3
+    """
+    from .masking import add_masking_policy
+
+    options = {}
+    if replacement:
+        options["replacement"] = replacement
+    if length is not None:
+        options["length"] = length
+    if sql_expr:
+        options["sql"] = sql_expr
+
+    result = add_masking_policy(table_name, column_name, strategy, options=options or None)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@mask.command("list")
+@click.option("--table", default=None, help="Filter by table")
+def mask_list(table: str):
+    """List masking policies.
+
+    Examples:
+        lakehouse mask list
+        lakehouse mask list --table users
+    """
+    from .masking import list_masking_policies
+
+    policies = list_masking_policies(table_name=table)
+    if not policies:
+        console.print("No masking policies configured.")
+        return
+
+    tbl = Table(title="Masking Policies")
+    tbl.add_column("Table", style="cyan")
+    tbl.add_column("Column")
+    tbl.add_column("Strategy", style="yellow")
+    tbl.add_column("Options", style="dim")
+    for p in policies:
+        opts = ", ".join(f"{k}={v}" for k, v in p["options"].items()) if p["options"] else "-"
+        tbl.add_row(p["table"], p["column"], p["strategy"], opts)
+    console.print(tbl)
+
+
+@mask.command("remove")
+@click.argument("table_name")
+@click.argument("column_name")
+def mask_remove(table_name: str, column_name: str):
+    """Remove a masking policy.
+
+    Examples:
+        lakehouse mask remove users email
+    """
+    from .masking import remove_masking_policy
+
+    result = remove_masking_policy(table_name, column_name)
+    console.print(result["message"])
+
+
+@mask.command("preview")
+@click.argument("table_name")
+@click.option("--rows", type=int, default=5, help="Number of rows to preview")
+def mask_preview(table_name: str, rows: int):
+    """Preview a table with masking applied.
+
+    Examples:
+        lakehouse mask preview users --rows 5
+    """
+    from .masking import preview_masking
+
+    catalog = _get_catalog()
+    result = preview_masking(catalog, table_name, max_rows=rows)
+
+    console.print(f"\n[bold]Masking Preview: {result['table']}[/bold] ({result['policies_applied']} policies)\n")
+
+    if result["masked"]:
+        cols = list(result["masked"][0].keys())
+        tbl = Table(title="Masked Data")
+        for col in cols:
+            tbl.add_column(col)
+        for row in result["masked"]:
+            tbl.add_row(*[str(row.get(c, "")) for c in cols])
+        console.print(tbl)
+
+
+@mask.command("query")
+@click.argument("sql")
+def mask_query(sql: str):
+    """Execute a query with masking applied.
+
+    Examples:
+        lakehouse mask query "SELECT * FROM users"
+    """
+    from .masking import query_with_masking
+    from .query import QueryEngine
+
+    engine = QueryEngine()
+    df = query_with_masking(engine, sql)
+    console.print(df.to_string())
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

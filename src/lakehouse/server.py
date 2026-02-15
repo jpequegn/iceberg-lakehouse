@@ -1218,6 +1218,60 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="add_masking_policy",
+            description="Add a data masking policy to a column (hash, redact, nullify, truncate, expression).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "column_name": {"type": "string", "description": "Column name"},
+                    "strategy": {
+                        "type": "string",
+                        "enum": ["hash", "redact", "nullify", "truncate", "expression"],
+                        "description": "Masking strategy",
+                    },
+                    "options": {
+                        "type": "object",
+                        "description": "Strategy options (replacement, length, sql)",
+                    },
+                },
+                "required": ["table_name", "column_name", "strategy"],
+            },
+        ),
+        Tool(
+            name="list_masking_policies",
+            description="List all data masking policies, optionally filtered by table.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Filter by table (optional)"},
+                },
+            },
+        ),
+        Tool(
+            name="remove_masking_policy",
+            description="Remove a data masking policy from a column.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "column_name": {"type": "string", "description": "Column name"},
+                },
+                "required": ["table_name", "column_name"],
+            },
+        ),
+        Tool(
+            name="query_with_masking",
+            description="Execute a SQL query with data masking policies applied to sensitive columns.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "SQL query to execute"},
+                },
+                "required": ["sql"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -3696,6 +3750,53 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Search glossary failed: {str(e)}")]
+
+        elif name == "add_masking_policy":
+            from .masking import add_masking_policy as _add_mask
+            try:
+                result = _add_mask(
+                    arguments["table_name"], arguments["column_name"],
+                    arguments["strategy"], options=arguments.get("options"),
+                )
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Add masking policy failed: {str(e)}")]
+
+        elif name == "list_masking_policies":
+            from .masking import list_masking_policies as _list_mask
+            try:
+                policies = _list_mask(table_name=arguments.get("table_name"))
+                if not policies:
+                    return [TextContent(type="text", text="No masking policies configured.")]
+                lines = ["## Masking Policies\n"]
+                lines.append("| Table | Column | Strategy | Options |")
+                lines.append("|-------|--------|----------|---------|")
+                for p in policies:
+                    opts = ", ".join(f"{k}={v}" for k, v in p["options"].items()) if p["options"] else "-"
+                    lines.append(f"| {p['table']} | {p['column']} | {p['strategy']} | {opts} |")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List masking policies failed: {str(e)}")]
+
+        elif name == "remove_masking_policy":
+            from .masking import remove_masking_policy as _remove_mask
+            try:
+                result = _remove_mask(arguments["table_name"], arguments["column_name"])
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Remove masking policy failed: {str(e)}")]
+
+        elif name == "query_with_masking":
+            from .masking import query_with_masking as _mask_query
+            from .query import QueryEngine
+            try:
+                engine = QueryEngine(catalog=get_catalog())
+                df = _mask_query(engine, arguments["sql"])
+                if df.empty:
+                    return [TextContent(type="text", text="Query returned no results.")]
+                return [TextContent(type="text", text=df.to_markdown(index=False))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Masked query failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
