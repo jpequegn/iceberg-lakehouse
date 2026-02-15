@@ -3151,7 +3151,8 @@ def schema_history(table_name: str):
     """
     from .schema_evolution import get_schema_history
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     history = get_schema_history(catalog, table_name)
 
     table = Table(title=f"Schema History: {table_name}")
@@ -3184,7 +3185,8 @@ def schema_diff_cmd(table_name: str, from_snapshot: int, to_snapshot: int):
     """
     from .schema_evolution import schema_diff
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     diff = schema_diff(catalog, table_name, from_snapshot=from_snapshot, to_snapshot=to_snapshot)
 
     console.print(f"\n[bold]Schema Diff:[/bold] {diff['table']}")
@@ -3217,7 +3219,8 @@ def schema_migrate(table_name: str, from_snapshot: int, to_snapshot: int):
     """
     from .schema_evolution import generate_migration
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     result = generate_migration(catalog, table_name, from_snapshot=from_snapshot, to_snapshot=to_snapshot)
 
     console.print(f"\n[bold]{result['message']}[/bold]\n")
@@ -3268,7 +3271,8 @@ def schema_check(table_name: str, add: tuple, drop: tuple, rename: tuple):
         if len(parts) == 2:
             proposed.append({"op": "rename_column", "column": parts[0], "new_name": parts[1]})
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     result = check_schema_compatibility(catalog, table_name, proposed)
 
     if result["compatible"]:
@@ -3404,7 +3408,8 @@ def retention_run(table_name: str, dry_run: bool):
     """
     from .retention import evaluate_retention
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     results = evaluate_retention(catalog, table_name=table_name, dry_run=dry_run)
 
     if not results:
@@ -3594,7 +3599,8 @@ def catalog_enriched_schema(table_name: str):
     """
     from .catalog_metadata import get_enriched_schema
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     result = get_enriched_schema(catalog, table_name)
 
     table = Table(title=f"Enriched Schema: {result['table']}")
@@ -3705,7 +3711,8 @@ def mask_preview(table_name: str, rows: int):
     """
     from .masking import preview_masking
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     result = preview_masking(catalog, table_name, max_rows=rows)
 
     console.print(f"\n[bold]Masking Preview: {result['table']}[/bold] ({result['policies_applied']} policies)\n")
@@ -3947,7 +3954,8 @@ def sla_check(table_name: str):
     """
     from .sla import check_sla
 
-    catalog = _get_catalog()
+    from .catalog import get_catalog
+    catalog = get_catalog()
     result = check_sla(catalog, table_name=table_name)
 
     console.print(f"\n[bold]SLA Check: {result['message']}[/bold]\n")
@@ -4787,6 +4795,87 @@ def cache_policy(table_name: str, ttl: int, disable: bool):
 
     result = set_cache_policy(table_name, ttl_seconds=ttl, enabled=not disable)
     console.print(result["message"])
+
+
+@main.group()
+def sample():
+    """Data sampling tools."""
+    pass
+
+
+main.add_command(sample)
+
+
+@sample.command("random")
+@click.argument("table_name")
+@click.option("--fraction", default=0.1, help="Fraction of rows (0.0-1.0)")
+@click.option("--seed", default=None, type=int, help="Random seed")
+@click.option("--limit", default=20, type=int, help="Max rows to display")
+def sample_random(table_name: str, fraction: float, seed: int, limit: int):
+    """Random sample from a table."""
+    from .sampling import random_sample
+    from .catalog import get_catalog
+    catalog = get_catalog()
+    result = random_sample(catalog, table_name, fraction=fraction, seed=seed, limit=limit)
+    console.print(f"[bold]{result['message']}[/bold]")
+    if result["rows"]:
+        table = Table(title=f"Random Sample ({result['sample_size']} rows)")
+        for col in result["rows"][0].keys():
+            table.add_column(col)
+        for row in result["rows"][:limit]:
+            table.add_row(*[str(v) for v in row.values()])
+        console.print(table)
+
+
+@sample.command("stratified")
+@click.argument("table_name")
+@click.argument("column")
+@click.option("--fraction", default=0.1, help="Fraction of rows per stratum")
+@click.option("--seed", default=None, type=int, help="Random seed")
+def sample_stratified(table_name: str, column: str, fraction: float, seed: int):
+    """Stratified sample maintaining column distribution."""
+    from .sampling import stratified_sample
+    from .catalog import get_catalog
+    catalog = get_catalog()
+    result = stratified_sample(catalog, table_name, column, fraction=fraction, seed=seed)
+    console.print(f"[bold]{result['message']}[/bold]")
+
+    strata_table = Table(title="Strata Distribution")
+    strata_table.add_column("Value")
+    strata_table.add_column("Total")
+    strata_table.add_column("Sampled")
+    for val, info in result["strata"].items():
+        strata_table.add_row(val, str(info["total"]), str(info["sampled"]))
+    console.print(strata_table)
+
+
+@sample.command("systematic")
+@click.argument("table_name")
+@click.option("--every", "every_nth", default=10, help="Take every Nth row")
+def sample_systematic(table_name: str, every_nth: int):
+    """Systematic sample (every Nth row)."""
+    from .sampling import systematic_sample
+    from .catalog import get_catalog
+    catalog = get_catalog()
+    result = systematic_sample(catalog, table_name, every_nth=every_nth)
+    console.print(f"[bold]{result['message']}[/bold]")
+
+
+@sample.command("create")
+@click.argument("table_name")
+@click.argument("sample_name")
+@click.option("--method", type=click.Choice(["random", "stratified", "systematic"]), default="random")
+@click.option("--fraction", default=0.1, help="Fraction of rows")
+@click.option("--column", default=None, help="Column for stratified sampling")
+@click.option("--every", "every_nth", default=10, help="Every Nth row for systematic")
+@click.option("--seed", default=None, type=int, help="Random seed")
+def sample_create(table_name: str, sample_name: str, method: str, fraction: float, column: str, every_nth: int, seed: int):
+    """Materialize a sample as a new table."""
+    from .sampling import sample_to_table
+    from .catalog import get_catalog
+    catalog = get_catalog()
+    result = sample_to_table(catalog, table_name, sample_name, method=method, fraction=fraction, column=column, every_nth=every_nth, seed=seed)
+    console.print(f"[green]{result['message']}[/green]")
 
 
 @main.command()
