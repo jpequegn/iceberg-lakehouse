@@ -3830,6 +3830,169 @@ def watermark_reset(pipeline_name: str, table: str):
     console.print(result["message"])
 
 
+@main.group()
+def sla():
+    """Table SLA monitoring commands."""
+    pass
+
+
+@sla.command("set")
+@click.argument("table_name")
+@click.option("--max-staleness", type=float, default=None, help="Max hours since last update")
+@click.option("--min-quality", type=float, default=None, help="Minimum quality score 0-100")
+@click.option("--min-rows", type=int, default=None, help="Minimum row count")
+@click.option("--max-null-pct", type=float, default=None, help="Max null percentage per column")
+def sla_set(table_name: str, max_staleness: float, min_quality: float, min_rows: int, max_null_pct: float):
+    """Set SLA thresholds for a table.
+
+    Examples:
+        lakehouse sla set expenses --max-staleness 24 --min-quality 80 --min-rows 100
+    """
+    from .sla import set_sla
+
+    sla_def = {}
+    if max_staleness is not None:
+        sla_def["max_staleness_hours"] = max_staleness
+    if min_quality is not None:
+        sla_def["min_quality_score"] = min_quality
+    if min_rows is not None:
+        sla_def["min_row_count"] = min_rows
+    if max_null_pct is not None:
+        sla_def["max_null_pct"] = max_null_pct
+
+    result = set_sla(table_name, sla_def)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@sla.command("show")
+@click.argument("table_name")
+def sla_show(table_name: str):
+    """Show SLA for a table.
+
+    Examples:
+        lakehouse sla show expenses
+    """
+    from .sla import get_sla
+
+    result = get_sla(table_name)
+    if result["sla"] is None:
+        console.print(f"No SLA for '{table_name}'")
+        return
+    s = result["sla"]
+    console.print(f"[bold]SLA: {result['table']}[/bold]")
+    if s.get("max_staleness_hours"):
+        console.print(f"  Max staleness: {s['max_staleness_hours']}h")
+    if s.get("min_quality_score"):
+        console.print(f"  Min quality: {s['min_quality_score']}")
+    if s.get("min_row_count") is not None:
+        console.print(f"  Min rows: {s['min_row_count']}")
+    if s.get("max_null_pct") is not None:
+        console.print(f"  Max null %: {s['max_null_pct']}%")
+
+
+@sla.command("list")
+def sla_list():
+    """List all SLA definitions.
+
+    Examples:
+        lakehouse sla list
+    """
+    from .sla import list_slas
+
+    slas = list_slas()
+    if not slas:
+        console.print("No SLAs configured.")
+        return
+    table = Table(title="SLA Definitions")
+    table.add_column("Table", style="cyan")
+    table.add_column("Max Staleness")
+    table.add_column("Min Quality")
+    table.add_column("Min Rows")
+    table.add_column("Max Null %")
+    for s in slas:
+        table.add_row(
+            s["table"],
+            f"{s.get('max_staleness_hours', '-')}h" if s.get("max_staleness_hours") else "-",
+            str(s.get("min_quality_score") or "-"),
+            str(s.get("min_row_count") if s.get("min_row_count") is not None else "-"),
+            f"{s.get('max_null_pct', '-')}%" if s.get("max_null_pct") is not None else "-",
+        )
+    console.print(table)
+
+
+@sla.command("remove")
+@click.argument("table_name")
+def sla_remove(table_name: str):
+    """Remove an SLA.
+
+    Examples:
+        lakehouse sla remove expenses
+    """
+    from .sla import remove_sla
+
+    result = remove_sla(table_name)
+    console.print(result["message"])
+
+
+@sla.command("check")
+@click.argument("table_name", required=False)
+def sla_check(table_name: str):
+    """Check SLA compliance.
+
+    Examples:
+        lakehouse sla check
+        lakehouse sla check expenses
+    """
+    from .sla import check_sla
+
+    catalog = _get_catalog()
+    result = check_sla(catalog, table_name=table_name)
+
+    console.print(f"\n[bold]SLA Check: {result['message']}[/bold]\n")
+    for t in result["tables"]:
+        if t["status"] == "passing":
+            console.print(f"  [green]{t['table']}: PASSING[/green]")
+        elif t["status"] == "warning":
+            console.print(f"  [yellow]{t['table']}: WARNING[/yellow]")
+            for w in t["warnings"]:
+                console.print(f"    - {w}")
+        elif t["status"] == "violation":
+            console.print(f"  [red]{t['table']}: VIOLATION[/red]")
+            for v in t["violations"]:
+                console.print(f"    - {v}")
+            if t.get("recommendations"):
+                for r in t["recommendations"]:
+                    console.print(f"    [dim]→ {r}[/dim]")
+
+
+@sla.command("history")
+@click.argument("table_name")
+def sla_history(table_name: str):
+    """Show SLA check history.
+
+    Examples:
+        lakehouse sla history expenses
+    """
+    from .sla import get_sla_history
+
+    history = get_sla_history(table_name)
+    if not history:
+        console.print(f"No SLA history for '{table_name}'")
+        return
+    table = Table(title=f"SLA History: {table_name}")
+    table.add_column("Checked At", style="dim")
+    table.add_column("Status")
+    table.add_column("Violations")
+    for h in history:
+        status_style = {"passing": "green", "warning": "yellow", "violation": "red"}.get(h["status"], "")
+        table.add_row(
+            h["checked_at"][:19],
+            f"[{status_style}]{h['status'].upper()}[/{status_style}]",
+            str(len(h.get("violations", []))),
+        )
+    console.print(table)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
