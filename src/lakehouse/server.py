@@ -1627,6 +1627,63 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="random_sample",
+            description="Get a random sample of rows from a table. Specify fraction (0.0-1.0), optional seed for reproducibility, and limit for max rows returned.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "fraction": {"type": "number", "description": "Fraction of rows (0.0-1.0, default: 0.1)"},
+                    "seed": {"type": "integer", "description": "Random seed for reproducibility"},
+                    "limit": {"type": "integer", "description": "Max rows to return"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="stratified_sample",
+            description="Get a stratified sample maintaining the distribution of a categorical column. Each stratum gets proportional representation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "column": {"type": "string", "description": "Column to stratify by"},
+                    "fraction": {"type": "number", "description": "Fraction per stratum (default: 0.1)"},
+                    "seed": {"type": "integer", "description": "Random seed"},
+                },
+                "required": ["table_name", "column"],
+            },
+        ),
+        Tool(
+            name="sample_to_table",
+            description="Materialize a sample as a new Iceberg table. Methods: random, stratified, systematic.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Source table name"},
+                    "sample_name": {"type": "string", "description": "Name for the new sample table"},
+                    "method": {"type": "string", "enum": ["random", "stratified", "systematic"], "description": "Sampling method"},
+                    "fraction": {"type": "number", "description": "Fraction (for random/stratified)"},
+                    "column": {"type": "string", "description": "Column for stratified sampling"},
+                    "every_nth": {"type": "integer", "description": "Every Nth row for systematic"},
+                    "seed": {"type": "integer", "description": "Random seed"},
+                },
+                "required": ["table_name", "sample_name"],
+            },
+        ),
+        Tool(
+            name="get_sample_stats",
+            description="Compare sample statistics vs full table: distribution similarity, coverage, numeric stats, and category frequencies.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Full table name"},
+                    "sample_name": {"type": "string", "description": "Sample table name"},
+                },
+                "required": ["table_name", "sample_name"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -4635,6 +4692,59 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Set cache policy failed: {str(e)}")]
+
+        elif name == "random_sample":
+            try:
+                from .sampling import random_sample
+                catalog = get_catalog()
+                result = random_sample(
+                    catalog, arguments["table_name"],
+                    fraction=arguments.get("fraction", 0.1),
+                    seed=arguments.get("seed"),
+                    limit=arguments.get("limit"),
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Random sample failed: {str(e)}")]
+
+        elif name == "stratified_sample":
+            try:
+                from .sampling import stratified_sample
+                catalog = get_catalog()
+                result = stratified_sample(
+                    catalog, arguments["table_name"],
+                    column=arguments["column"],
+                    fraction=arguments.get("fraction", 0.1),
+                    seed=arguments.get("seed"),
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Stratified sample failed: {str(e)}")]
+
+        elif name == "sample_to_table":
+            try:
+                from .sampling import sample_to_table
+                catalog = get_catalog()
+                result = sample_to_table(
+                    catalog, arguments["table_name"], arguments["sample_name"],
+                    method=arguments.get("method", "random"),
+                    fraction=arguments.get("fraction", 0.1),
+                    column=arguments.get("column"),
+                    every_nth=arguments.get("every_nth", 10),
+                    seed=arguments.get("seed"),
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Sample to table failed: {str(e)}")]
+
+        elif name == "get_sample_stats":
+            try:
+                from .sampling import get_sample_stats
+                catalog = get_catalog()
+                result = get_sample_stats(catalog, arguments["table_name"], arguments["sample_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get sample stats failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
