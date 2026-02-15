@@ -1389,6 +1389,49 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="backup_table",
+            description="Backup a table's data and metadata to a compressed archive (.tar.gz).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name to backup"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="restore_table",
+            description="Restore a table from a backup archive. Optionally rename the table on restore.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "archive_path": {"type": "string", "description": "Path to backup archive (.tar.gz)"},
+                    "table_name": {"type": "string", "description": "Optional: rename table on restore"},
+                    "overwrite": {"type": "boolean", "description": "Overwrite existing table (default: false)"},
+                },
+                "required": ["archive_path"],
+            },
+        ),
+        Tool(
+            name="list_backups",
+            description="List available backup archives with metadata.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="verify_backup",
+            description="Verify backup archive integrity (checksums, schema).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "archive_path": {"type": "string", "description": "Path to backup archive"},
+                },
+                "required": ["archive_path"],
+            },
+        ),
+        Tool(
             name="get_table_changes",
             description="Get row-level changes (INSERT, UPDATE, DELETE) between two snapshots of a table. Detects updates when key columns match but values differ.",
             inputSchema={
@@ -4169,6 +4212,59 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Cost estimation failed: {str(e)}")]
+
+        elif name == "backup_table":
+            from .backup import backup_table as _backup_table
+            try:
+                catalog = get_catalog()
+                result = _backup_table(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=f"## Backup Complete\n\n{result['message']}\n\n- **Archive:** {result['archive']}\n- **Rows:** {result['row_count']:,}\n- **Size:** {result['size_bytes']:,} bytes")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Backup failed: {str(e)}")]
+
+        elif name == "restore_table":
+            from .backup import restore_table as _restore_table
+            try:
+                catalog = get_catalog()
+                result = _restore_table(
+                    catalog,
+                    arguments["archive_path"],
+                    table_name=arguments.get("table_name"),
+                    overwrite=arguments.get("overwrite", False),
+                )
+                return [TextContent(type="text", text=f"## Restore Complete\n\n{result['message']}\n\n- **Table:** {result['table']}\n- **Rows restored:** {result['rows_restored']:,}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Restore failed: {str(e)}")]
+
+        elif name == "list_backups":
+            from .backup import list_backups as _list_backups
+            try:
+                backups = _list_backups()
+                if not backups:
+                    return [TextContent(type="text", text="No backups found.")]
+                lines = ["## Available Backups\n"]
+                lines.append("| File | Table | Rows | Size | Date |")
+                lines.append("|------|-------|------|------|------|")
+                for b in backups:
+                    lines.append(f"| {b['file']} | {b.get('table', '?')} | {b.get('row_count', '?')} | {b['size_bytes']:,} | {b.get('backed_up_at', '')[:19]} |")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List backups failed: {str(e)}")]
+
+        elif name == "verify_backup":
+            from .backup import verify_backup as _verify_backup
+            try:
+                result = _verify_backup(arguments["archive_path"])
+                lines = [f"## Backup Verification\n", f"{result['message']}\n"]
+                if result["valid"]:
+                    for t in result["tables_verified"]:
+                        lines.append(f"- ✓ {t}")
+                else:
+                    for issue in result["issues"]:
+                        lines.append(f"- ✗ {issue}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Verify backup failed: {str(e)}")]
 
         elif name == "get_table_changes":
             from .cdc import get_changes as _get_changes
