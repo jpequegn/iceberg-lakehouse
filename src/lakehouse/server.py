@@ -24,6 +24,7 @@ from .maintenance import set_maintenance_policy, get_maintenance_policy, remove_
 from .views import create_view, list_views, get_view, drop_view, query_view
 from .tagging import tag_table, untag_table, get_tags, search_by_tag, set_table_description, get_table_description, bookmark_table, unbookmark_table, list_bookmarks, search_tables
 from .lineage import record_lineage, get_upstream, get_downstream, get_lineage_graph, remove_lineage, get_impact_analysis
+from .cloning import clone_table, list_clones, promote_clone, discard_clone
 
 
 # Initialize server
@@ -1253,6 +1254,50 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        Tool(
+            name="clone_table",
+            description="Clone an Iceberg table for safe experimentation. Creates a new table with the same data.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_table": {"type": "string", "description": "Source table name to clone"},
+                    "target_table": {"type": "string", "description": "Target table name for the clone"},
+                    "as_of": {"type": "string", "description": "Optional snapshot ID or ISO timestamp for point-in-time clone"},
+                },
+                "required": ["source_table", "target_table"],
+            },
+        ),
+        Tool(
+            name="list_clones",
+            description="List all active table clones.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="promote_clone",
+            description="Replace the original table's data with the clone's data, then remove the clone.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "clone_table": {"type": "string", "description": "Clone table name"},
+                    "original_table": {"type": "string", "description": "Original table to overwrite"},
+                },
+                "required": ["clone_table", "original_table"],
+            },
+        ),
+        Tool(
+            name="discard_clone",
+            description="Drop a cloned table and remove its metadata.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "clone_table": {"type": "string", "description": "Clone table name to discard"},
+                },
+                "required": ["clone_table"],
             },
         ),
     ]
@@ -2813,6 +2858,55 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Search failed: {str(e)}")]
+
+        elif name == "clone_table":
+            try:
+                src = arguments.get("source_table")
+                tgt = arguments.get("target_table")
+                as_of = arguments.get("as_of")
+                if not src or not tgt:
+                    return [TextContent(type="text", text="Error: 'source_table' and 'target_table' are required")]
+                catalog = get_catalog()
+                result = clone_table(catalog, src, tgt, as_of=as_of)
+                return [TextContent(type="text", text=f"**{result['message']}**\n\nSource snapshot: {result['source_snapshot_id']}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Clone failed: {str(e)}")]
+
+        elif name == "list_clones":
+            try:
+                clones = list_clones()
+                if not clones:
+                    return [TextContent(type="text", text="No active clones.")]
+                lines = [f"**Active Clones ({len(clones)}):**\n"]
+                for c in clones:
+                    as_of_info = f" (as of {c['as_of']})" if c.get("as_of") else ""
+                    lines.append(f"- **{c['clone']}** ← {c['source_table']} ({c['row_count']} rows){as_of_info}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List clones failed: {str(e)}")]
+
+        elif name == "promote_clone":
+            try:
+                clone_name = arguments.get("clone_table")
+                original = arguments.get("original_table")
+                if not clone_name or not original:
+                    return [TextContent(type="text", text="Error: 'clone_table' and 'original_table' are required")]
+                catalog = get_catalog()
+                result = promote_clone(catalog, clone_name, original)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Promote clone failed: {str(e)}")]
+
+        elif name == "discard_clone":
+            try:
+                clone_name = arguments.get("clone_table")
+                if not clone_name:
+                    return [TextContent(type="text", text="Error: 'clone_table' is required")]
+                catalog = get_catalog()
+                result = discard_clone(catalog, clone_name)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Discard clone failed: {str(e)}")]
 
         elif name == "record_lineage":
             try:
