@@ -25,6 +25,7 @@ from .views import create_view, list_views, get_view, drop_view, query_view
 from .tagging import tag_table, untag_table, get_tags, search_by_tag, set_table_description, get_table_description, bookmark_table, unbookmark_table, list_bookmarks, search_tables
 from .lineage import record_lineage, get_upstream, get_downstream, get_lineage_graph, remove_lineage, get_impact_analysis
 from .cloning import clone_table, list_clones, promote_clone, discard_clone
+from .joins import execute_join, join_to_table, suggest_joins
 
 
 # Initialize server
@@ -1298,6 +1299,42 @@ async def list_tools() -> list[Tool]:
                     "clone_table": {"type": "string", "description": "Clone table name to discard"},
                 },
                 "required": ["clone_table"],
+            },
+        ),
+        Tool(
+            name="execute_join",
+            description="Execute a cross-table join query. Supports namespace-qualified table references like 'default.expenses'.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "SQL join query"},
+                    "max_rows": {"type": "integer", "description": "Maximum rows to return (default: 1000)", "default": 1000},
+                },
+                "required": ["sql"],
+            },
+        ),
+        Tool(
+            name="join_to_table",
+            description="Execute a join query and save results to a new or existing table.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "SQL join query"},
+                    "target_table": {"type": "string", "description": "Target table name for results"},
+                    "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "Write mode", "default": "overwrite"},
+                },
+                "required": ["sql", "target_table"],
+            },
+        ),
+        Tool(
+            name="suggest_joins",
+            description="Suggest possible joins for a table by finding matching column names across other tables.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table to find join partners for"},
+                },
+                "required": ["table_name"],
             },
         ),
     ]
@@ -2858,6 +2895,51 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Search failed: {str(e)}")]
+
+        elif name == "execute_join":
+            try:
+                sql = arguments.get("sql")
+                max_rows = arguments.get("max_rows", 1000)
+                if not sql:
+                    return [TextContent(type="text", text="Error: 'sql' is required")]
+                catalog = get_catalog()
+                result = execute_join(catalog, sql, max_rows=max_rows)
+                df = result["dataframe"]
+                if df.empty:
+                    return [TextContent(type="text", text="Join returned no results.")]
+                markdown = df.to_markdown(index=False)
+                return [TextContent(type="text", text=f"**Join results ({result['row_count']} rows):**\n\n{markdown}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Join failed: {str(e)}")]
+
+        elif name == "join_to_table":
+            try:
+                sql = arguments.get("sql")
+                target = arguments.get("target_table")
+                mode = arguments.get("mode", "overwrite")
+                if not sql or not target:
+                    return [TextContent(type="text", text="Error: 'sql' and 'target_table' are required")]
+                catalog = get_catalog()
+                result = join_to_table(catalog, sql, target, mode=mode)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Join to table failed: {str(e)}")]
+
+        elif name == "suggest_joins":
+            try:
+                tbl = arguments.get("table_name")
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+                catalog = get_catalog()
+                suggestions = suggest_joins(catalog, tbl)
+                if not suggestions:
+                    return [TextContent(type="text", text=f"No join suggestions for {tbl}")]
+                lines = [f"**Join suggestions for {tbl} ({len(suggestions)}):**\n"]
+                for s in suggestions:
+                    lines.append(f"- **{s['table']}** on `{s['column']}` ({s['source_type']} = {s['target_type']})")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Suggest joins failed: {str(e)}")]
 
         elif name == "clone_table":
             try:
