@@ -2366,6 +2366,106 @@ def search_cmd(query: str):
     console.print(table)
 
 
+@main.group("clone")
+def clone_group():
+    """Clone tables for safe experimentation.
+
+    Examples:
+        lakehouse clone create expenses expenses_experiment
+        lakehouse clone create expenses expenses_backup --as-of 2026-01-15
+        lakehouse clone list
+        lakehouse clone promote expenses_experiment expenses
+        lakehouse clone discard expenses_experiment
+    """
+    pass
+
+
+@clone_group.command("create")
+@click.argument("source_table")
+@click.argument("target_table")
+@click.option("--as-of", default=None, help="Snapshot ID or ISO timestamp for point-in-time clone")
+def clone_create(source_table: str, target_table: str, as_of: str):
+    """Clone a table (zero-copy)."""
+    from .catalog import get_catalog
+    from .cloning import clone_table
+
+    catalog = get_catalog()
+
+    try:
+        result = clone_table(catalog, source_table, target_table, as_of=as_of)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+        if result["as_of"]:
+            console.print(f"  Point-in-time: {result['as_of']}")
+        console.print(f"  Source snapshot: {result['source_snapshot_id']}")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@clone_group.command("list")
+def clone_list():
+    """List all active clones."""
+    from .cloning import list_clones
+
+    clones = list_clones()
+    if not clones:
+        console.print("[yellow]No active clones.[/yellow]")
+        return
+
+    console.print(f"[bold]Active Clones ({len(clones)}):[/bold]\n")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Clone")
+    table.add_column("Source")
+    table.add_column("Rows", justify="right")
+    table.add_column("Cloned At")
+    table.add_column("As Of")
+
+    for c in clones:
+        table.add_row(
+            c["clone"],
+            c["source_table"],
+            str(c["row_count"]),
+            c["cloned_at"][:19],
+            c.get("as_of") or "",
+        )
+    console.print(table)
+
+
+@clone_group.command("promote")
+@click.argument("clone_table")
+@click.argument("original_table")
+def clone_promote(clone_table: str, original_table: str):
+    """Promote a clone to replace the original table."""
+    from .catalog import get_catalog
+    from .cloning import promote_clone
+
+    catalog = get_catalog()
+
+    try:
+        result = promote_clone(catalog, clone_table, original_table)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@clone_group.command("discard")
+@click.argument("clone_table")
+def clone_discard(clone_table: str):
+    """Discard (drop) a cloned table."""
+    from .catalog import get_catalog
+    from .cloning import discard_clone
+
+    catalog = get_catalog()
+
+    try:
+        result = discard_clone(catalog, clone_table)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.group("lineage")
 def lineage_group():
     """Track data lineage (table-level dependency graph).
