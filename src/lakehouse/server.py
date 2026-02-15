@@ -1133,6 +1133,39 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="set_retention_policy",
+            description="Set a snapshot retention policy for a table (max age, max count, min keep).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "max_snapshot_age_hours": {"type": "number", "description": "Max snapshot age in hours (optional)"},
+                    "max_snapshot_count": {"type": "integer", "description": "Max number of snapshots (optional)"},
+                    "min_snapshots_to_keep": {"type": "integer", "description": "Min snapshots to always keep (default: 1)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="list_retention_policies",
+            description="List all snapshot retention policies.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="evaluate_retention",
+            description="Evaluate and enforce snapshot retention policies. Use dry_run to preview without acting.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name (optional, omit for all)"},
+                    "dry_run": {"type": "boolean", "description": "Preview without acting (default: false)"},
+                },
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -3511,6 +3544,58 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Schema compatibility check failed: {str(e)}")]
+
+        elif name == "set_retention_policy":
+            from .retention import set_retention_policy as _set_retention
+            try:
+                policy = {}
+                if "max_snapshot_age_hours" in arguments:
+                    policy["max_snapshot_age_hours"] = arguments["max_snapshot_age_hours"]
+                if "max_snapshot_count" in arguments:
+                    policy["max_snapshot_count"] = arguments["max_snapshot_count"]
+                if "min_snapshots_to_keep" in arguments:
+                    policy["min_snapshots_to_keep"] = arguments["min_snapshots_to_keep"]
+                result = _set_retention(arguments["table_name"], policy)
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Set retention policy failed: {str(e)}")]
+
+        elif name == "list_retention_policies":
+            from .retention import list_retention_policies as _list_retention
+            try:
+                policies = _list_retention()
+                if not policies:
+                    return [TextContent(type="text", text="No retention policies configured.")]
+                lines = ["## Retention Policies\n"]
+                lines.append("| Table | Max Age (hrs) | Max Count | Min Keep | Last Evaluated |")
+                lines.append("|-------|---------------|-----------|----------|----------------|")
+                for p in policies:
+                    lines.append(
+                        f"| {p['table']} | {p.get('max_snapshot_age_hours') or '-'} | "
+                        f"{p.get('max_snapshot_count') or '-'} | {p.get('min_snapshots_to_keep', 1)} | "
+                        f"{p.get('last_evaluated') or 'never'} |"
+                    )
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List retention policies failed: {str(e)}")]
+
+        elif name == "evaluate_retention":
+            from .retention import evaluate_retention as _eval_retention
+            try:
+                catalog = get_catalog()
+                results = _eval_retention(
+                    catalog,
+                    table_name=arguments.get("table_name"),
+                    dry_run=arguments.get("dry_run", False),
+                )
+                if not results:
+                    return [TextContent(type="text", text="No tables with retention policies to evaluate.")]
+                lines = ["## Retention Evaluation\n"]
+                for r in results:
+                    lines.append(f"- **{r['table']}**: {r['message']}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Evaluate retention failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
