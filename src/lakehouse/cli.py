@@ -3133,6 +3133,157 @@ def quality_history(table_name: str):
     console.print(table)
 
 
+@main.group()
+def schema():
+    """Schema evolution tracking commands."""
+    pass
+
+
+@schema.command("history")
+@click.argument("table_name")
+def schema_history(table_name: str):
+    """Show schema evolution history for a table.
+
+    Examples:
+        lakehouse schema history my_table
+    """
+    from .schema_evolution import get_schema_history
+
+    catalog = _get_catalog()
+    history = get_schema_history(catalog, table_name)
+
+    table = Table(title=f"Schema History: {table_name}")
+    table.add_column("Schema ID", style="cyan")
+    table.add_column("Snapshot", style="dim")
+    table.add_column("Timestamp", style="dim")
+    table.add_column("Fields")
+    table.add_column("Change", style="yellow")
+
+    for entry in history:
+        fields = ", ".join(f["name"] for f in entry["fields"])
+        snap = str(entry["snapshot_id"]) if entry["snapshot_id"] else "-"
+        ts = entry["timestamp"][:19] if entry["timestamp"] else "-"
+        change = entry["change_summary"] or "-"
+        table.add_row(str(entry["schema_id"]), snap, ts, fields, change)
+
+    console.print(table)
+
+
+@schema.command("diff")
+@click.argument("table_name")
+@click.option("--from-snapshot", type=int, default=None, help="Starting snapshot ID")
+@click.option("--to-snapshot", type=int, default=None, help="Ending snapshot ID")
+def schema_diff_cmd(table_name: str, from_snapshot: int, to_snapshot: int):
+    """Show schema diff between snapshots.
+
+    Examples:
+        lakehouse schema diff my_table
+        lakehouse schema diff my_table --from-snapshot 123 --to-snapshot 456
+    """
+    from .schema_evolution import schema_diff
+
+    catalog = _get_catalog()
+    diff = schema_diff(catalog, table_name, from_snapshot=from_snapshot, to_snapshot=to_snapshot)
+
+    console.print(f"\n[bold]Schema Diff:[/bold] {diff['table']}")
+    console.print(f"  From schema {diff['from_schema_id']} → {diff['to_schema_id']}")
+    console.print(f"  Summary: {diff['summary']}\n")
+
+    if diff["added_columns"]:
+        for c in diff["added_columns"]:
+            console.print(f"  [green]+ {c['name']} ({c['type']})[/green]")
+    if diff["dropped_columns"]:
+        for c in diff["dropped_columns"]:
+            console.print(f"  [red]- {c['name']} ({c['type']})[/red]")
+    if diff["renamed_columns"]:
+        for c in diff["renamed_columns"]:
+            console.print(f"  [yellow]~ {c['old_name']} → {c['new_name']}[/yellow]")
+    if diff["type_changes"]:
+        for c in diff["type_changes"]:
+            console.print(f"  [yellow]~ {c['name']}: {c['old_type']} → {c['new_type']}[/yellow]")
+
+
+@schema.command("migrate")
+@click.argument("table_name")
+@click.option("--from-snapshot", type=int, default=None, help="Starting snapshot ID")
+@click.option("--to-snapshot", type=int, default=None, help="Ending snapshot ID")
+def schema_migrate(table_name: str, from_snapshot: int, to_snapshot: int):
+    """Generate migration steps between schema versions.
+
+    Examples:
+        lakehouse schema migrate my_table
+    """
+    from .schema_evolution import generate_migration
+
+    catalog = _get_catalog()
+    result = generate_migration(catalog, table_name, from_snapshot=from_snapshot, to_snapshot=to_snapshot)
+
+    console.print(f"\n[bold]{result['message']}[/bold]\n")
+
+    if result["steps"]:
+        table = Table(title="Migration Steps")
+        table.add_column("#", style="cyan")
+        table.add_column("Operation", style="yellow")
+        table.add_column("Column")
+        table.add_column("Details")
+
+        for i, step in enumerate(result["steps"], 1):
+            details = ""
+            if step["operation"] == "add_column":
+                details = f"type: {step['column_type']}"
+            elif step["operation"] == "rename_column":
+                details = f"→ {step['new_name']}"
+            table.add_row(str(i), step["operation"], step["column_name"], details)
+
+        console.print(table)
+    else:
+        console.print("  No migration steps needed.")
+
+
+@schema.command("check")
+@click.argument("table_name")
+@click.option("--add", multiple=True, help="Add column: NAME:TYPE (e.g. email:string)")
+@click.option("--drop", multiple=True, help="Drop column: NAME")
+@click.option("--rename", multiple=True, help="Rename column: OLD:NEW")
+def schema_check(table_name: str, add: tuple, drop: tuple, rename: tuple):
+    """Check schema change compatibility.
+
+    Examples:
+        lakehouse schema check my_table --add email:string
+        lakehouse schema check my_table --drop old_column
+        lakehouse schema check my_table --rename name:full_name
+    """
+    from .schema_evolution import check_schema_compatibility
+
+    proposed = []
+    for a in add:
+        parts = a.split(":", 1)
+        proposed.append({"op": "add_column", "column": parts[0], "type": parts[1] if len(parts) > 1 else "string"})
+    for d in drop:
+        proposed.append({"op": "drop_column", "column": d})
+    for r in rename:
+        parts = r.split(":", 1)
+        if len(parts) == 2:
+            proposed.append({"op": "rename_column", "column": parts[0], "new_name": parts[1]})
+
+    catalog = _get_catalog()
+    result = check_schema_compatibility(catalog, table_name, proposed)
+
+    if result["compatible"]:
+        console.print(f"\n[green bold]Compatible[/green bold]: {result['message']}")
+    else:
+        console.print(f"\n[red bold]NOT Compatible[/red bold]: {result['message']}")
+
+    if result["breaking_changes"]:
+        console.print("\n[red]Breaking changes:[/red]")
+        for bc in result["breaking_changes"]:
+            console.print(f"  - {bc}")
+    if result["warnings"]:
+        console.print("\n[yellow]Warnings:[/yellow]")
+        for w in result["warnings"]:
+            console.print(f"  - {w}")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
