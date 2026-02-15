@@ -3734,6 +3734,102 @@ def mask_query(sql: str):
     console.print(df.to_string())
 
 
+@main.group()
+def watermark():
+    """Watermark tracking commands for incremental processing."""
+    pass
+
+
+@watermark.command("set")
+@click.argument("pipeline_name")
+@click.argument("table_name")
+@click.argument("snapshot_id", type=int)
+def watermark_set(pipeline_name: str, table_name: str, snapshot_id: int):
+    """Set a watermark for a pipeline/table pair.
+
+    Examples:
+        lakehouse watermark set etl_daily raw_events 1234567890
+    """
+    from .incremental import set_watermark
+
+    result = set_watermark(pipeline_name, table_name, snapshot_id)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@watermark.command("show")
+@click.argument("pipeline_name")
+@click.argument("table_name", required=False)
+def watermark_show(pipeline_name: str, table_name: str):
+    """Show watermarks for a pipeline.
+
+    Examples:
+        lakehouse watermark show etl_daily
+    """
+    from .incremental import list_watermarks, get_watermark
+
+    if table_name:
+        result = get_watermark(pipeline_name, table_name)
+        if result["snapshot_id"] is None:
+            console.print(f"No watermark for '{pipeline_name}/{table_name}'")
+        else:
+            console.print(f"[bold]{result['pipeline']}/{result['table']}[/bold]")
+            console.print(f"  Snapshot: {result['snapshot_id']}")
+            console.print(f"  Processed at: {result.get('processed_at', 'unknown')}")
+            console.print(f"  Rows: {result.get('rows_processed', 0)}")
+    else:
+        results = list_watermarks(pipeline_name=pipeline_name)
+        if not results:
+            console.print(f"No watermarks for pipeline '{pipeline_name}'")
+            return
+        table = Table(title=f"Watermarks: {pipeline_name}")
+        table.add_column("Table", style="cyan")
+        table.add_column("Snapshot")
+        table.add_column("Processed At", style="dim")
+        table.add_column("Rows")
+        for r in results:
+            table.add_row(r["table"], str(r["snapshot_id"]), str(r.get("processed_at", "")[:19]), str(r.get("rows_processed", 0)))
+        console.print(table)
+
+
+@watermark.command("list")
+def watermark_list():
+    """List all watermarks.
+
+    Examples:
+        lakehouse watermark list
+    """
+    from .incremental import list_watermarks
+
+    results = list_watermarks()
+    if not results:
+        console.print("No watermarks configured.")
+        return
+    table = Table(title="All Watermarks")
+    table.add_column("Pipeline", style="cyan")
+    table.add_column("Table")
+    table.add_column("Snapshot")
+    table.add_column("Processed At", style="dim")
+    for r in results:
+        table.add_row(r["pipeline"], r["table"], str(r["snapshot_id"]), str(r.get("processed_at", "")[:19]))
+    console.print(table)
+
+
+@watermark.command("reset")
+@click.argument("pipeline_name")
+@click.option("--table", default=None, help="Reset only for a specific table")
+def watermark_reset(pipeline_name: str, table: str):
+    """Reset watermarks to force full reprocessing.
+
+    Examples:
+        lakehouse watermark reset etl_daily
+        lakehouse watermark reset etl_daily --table raw_events
+    """
+    from .incremental import reset_watermark
+
+    result = reset_watermark(pipeline_name, table_name=table)
+    console.print(result["message"])
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
