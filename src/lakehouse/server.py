@@ -23,6 +23,7 @@ from .dashboard import get_dashboard
 from .maintenance import set_maintenance_policy, get_maintenance_policy, remove_maintenance_policy, run_maintenance, check_maintenance_needed
 from .views import create_view, list_views, get_view, drop_view, query_view
 from .tagging import tag_table, untag_table, get_tags, search_by_tag, set_table_description, get_table_description, bookmark_table, unbookmark_table, list_bookmarks, search_tables
+from .lineage import record_lineage, get_upstream, get_downstream, get_lineage_graph, remove_lineage, get_impact_analysis
 
 
 # Initialize server
@@ -1218,6 +1219,40 @@ async def list_tools() -> list[Tool]:
                     "query": {"type": "string", "description": "Search string"},
                 },
                 "required": ["query"],
+            },
+        ),
+        Tool(
+            name="record_lineage",
+            description="Record a data lineage edge: source tables → target table. Tracks which tables were used to produce other tables.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_tables": {"type": "array", "items": {"type": "string"}, "description": "Source table names"},
+                    "target_table": {"type": "string", "description": "Target table name"},
+                    "operation": {"type": "string", "description": "Operation type (manual, insert_from, view, pipeline)", "default": "manual"},
+                    "sql": {"type": "string", "description": "Optional SQL that produced this relationship"},
+                },
+                "required": ["source_tables", "target_table"],
+            },
+        ),
+        Tool(
+            name="get_lineage",
+            description="Get upstream or downstream lineage for a table. Shows data dependencies and impact.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "direction": {"type": "string", "enum": ["upstream", "downstream", "impact"], "description": "Direction: upstream (what feeds in), downstream (what depends on it), or impact (drop analysis)", "default": "upstream"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="lineage_graph",
+            description="Get the full data lineage graph showing all table dependencies.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
             },
         ),
     ]
@@ -2778,6 +2813,60 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Search failed: {str(e)}")]
+
+        elif name == "record_lineage":
+            try:
+                sources = arguments.get("source_tables", [])
+                target = arguments.get("target_table")
+                operation = arguments.get("operation", "manual")
+                sql = arguments.get("sql")
+                if not sources or not target:
+                    return [TextContent(type="text", text="Error: 'source_tables' and 'target_table' are required")]
+                result = record_lineage(sources, target, operation=operation, sql=sql)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Record lineage failed: {str(e)}")]
+
+        elif name == "get_lineage":
+            try:
+                tbl = arguments.get("table_name")
+                direction = arguments.get("direction", "upstream")
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+
+                if direction == "impact":
+                    result = get_impact_analysis(tbl)
+                    lines = [f"**{result['message']}**\n"]
+                    for d in result["details"]:
+                        lines.append(f"- {d['table']} (depth {d['depth']}, via {d['operation']})")
+                    return [TextContent(type="text", text="\n".join(lines))]
+
+                if direction == "downstream":
+                    deps = get_downstream(tbl)
+                else:
+                    deps = get_upstream(tbl)
+
+                if not deps:
+                    return [TextContent(type="text", text=f"No {direction} dependencies for {tbl}")]
+                lines = [f"**{direction.title()} dependencies for {tbl} ({len(deps)}):**\n"]
+                for d in deps:
+                    lines.append(f"- {d['table']} (depth {d['depth']}, via {d['operation']})")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get lineage failed: {str(e)}")]
+
+        elif name == "lineage_graph":
+            try:
+                graph = get_lineage_graph()
+                if not graph["nodes"]:
+                    return [TextContent(type="text", text="No lineage data recorded.")]
+                lines = [f"**Lineage Graph ({graph['node_count']} tables, {graph['edge_count']} edges):**\n"]
+                for edge in graph["edges"]:
+                    sources = ", ".join(edge["sources"])
+                    lines.append(f"- {sources} →({edge['operation']})→ {edge['target']}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Lineage graph failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
