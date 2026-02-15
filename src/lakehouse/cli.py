@@ -4190,6 +4190,128 @@ def optimize_cost(sql: str):
 
 
 @main.group()
+def backup():
+    """Backup and restore commands."""
+    pass
+
+
+@backup.command("create")
+@click.argument("table_name")
+@click.option("--output", "-o", default=None, help="Output directory")
+def backup_create(table_name: str, output: str):
+    """Backup a table to a compressed archive.
+
+    Examples:
+        lakehouse backup create expenses
+        lakehouse backup create expenses --output /tmp/backups
+    """
+    from pathlib import Path
+    from .catalog import get_catalog
+    from .backup import backup_table
+
+    catalog = get_catalog()
+    output_dir = Path(output) if output else None
+    result = backup_table(catalog, table_name, output_dir=output_dir)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@backup.command("create-ns")
+@click.argument("namespace")
+@click.option("--output", "-o", default=None, help="Output directory")
+def backup_create_ns(namespace: str, output: str):
+    """Backup all tables in a namespace.
+
+    Examples:
+        lakehouse backup create-ns default
+    """
+    from pathlib import Path
+    from .catalog import get_catalog
+    from .backup import backup_namespace
+
+    catalog = get_catalog()
+    output_dir = Path(output) if output else None
+    result = backup_namespace(catalog, namespace, output_dir=output_dir)
+    console.print(f"[green]{result['message']}[/green]")
+    for tbl in result.get("tables", []):
+        console.print(f"  • {tbl}")
+
+
+@backup.command("restore")
+@click.argument("archive")
+@click.option("--name", default=None, help="Rename table on restore")
+@click.option("--overwrite", is_flag=True, help="Overwrite existing table")
+def backup_restore(archive: str, name: str, overwrite: bool):
+    """Restore a table from a backup archive.
+
+    Examples:
+        lakehouse backup restore ~/.lakehouse/backups/expenses_20260215.tar.gz
+        lakehouse backup restore archive.tar.gz --name new_expenses --overwrite
+    """
+    from .catalog import get_catalog
+    from .backup import restore_table
+
+    catalog = get_catalog()
+    result = restore_table(catalog, archive, table_name=name, overwrite=overwrite)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@backup.command("list")
+@click.option("--dir", "backup_dir", default=None, help="Backup directory")
+def backup_list(backup_dir: str):
+    """List available backup archives.
+
+    Examples:
+        lakehouse backup list
+    """
+    from pathlib import Path
+    from .backup import list_backups
+
+    dir_path = Path(backup_dir) if backup_dir else None
+    backups = list_backups(dir_path)
+
+    if not backups:
+        console.print("[dim]No backups found.[/dim]")
+        return
+
+    table = Table(title="Available Backups")
+    table.add_column("File", style="cyan")
+    table.add_column("Table", style="green")
+    table.add_column("Rows", style="yellow")
+    table.add_column("Size", style="bold")
+    table.add_column("Date", style="dim")
+    for b in backups:
+        table.add_row(
+            b["file"],
+            b.get("table", "?"),
+            str(b.get("row_count", "?")),
+            f"{b['size_bytes']:,}",
+            b.get("backed_up_at", "")[:19],
+        )
+    console.print(table)
+
+
+@backup.command("verify")
+@click.argument("archive")
+def backup_verify(archive: str):
+    """Verify backup archive integrity.
+
+    Examples:
+        lakehouse backup verify ~/.lakehouse/backups/expenses_20260215.tar.gz
+    """
+    from .backup import verify_backup
+
+    result = verify_backup(archive)
+    if result["valid"]:
+        console.print(f"[green]{result['message']}[/green]")
+        for t in result["tables_verified"]:
+            console.print(f"  ✓ {t}")
+    else:
+        console.print(f"[red]{result['message']}[/red]")
+        for issue in result["issues"]:
+            console.print(f"  ✗ {issue}")
+
+
+@main.group()
 def cdc():
     """Change data capture commands."""
     pass
