@@ -1390,6 +1390,59 @@ async def list_tools() -> list[Tool]:
                 "required": ["name"],
             },
         ),
+        Tool(
+            name="create_pipeline",
+            description="Create a multi-step data pipeline — ordered SQL transformations that can be run repeatedly.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pipeline name"},
+                    "steps": {
+                        "type": "array",
+                        "description": "List of steps, each with sql (required), target_table (optional), mode (optional: overwrite/append)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "sql": {"type": "string"},
+                                "target_table": {"type": "string"},
+                                "mode": {"type": "string", "enum": ["overwrite", "append"]},
+                            },
+                            "required": ["sql"],
+                        },
+                    },
+                    "description": {"type": "string", "description": "Optional description"},
+                },
+                "required": ["name", "steps"],
+            },
+        ),
+        Tool(
+            name="list_pipelines",
+            description="List all defined data pipelines.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="run_pipeline",
+            description="Execute a data pipeline — runs all steps sequentially. Use dry_run=true to validate without executing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pipeline name"},
+                    "dry_run": {"type": "boolean", "description": "Validate SQL without executing", "default": False},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="drop_pipeline",
+            description="Drop a data pipeline definition.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pipeline name to drop"},
+                },
+                "required": ["name"],
+            },
+        ),
     ]
 
 
@@ -3160,6 +3213,66 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Lineage graph failed: {str(e)}")]
+
+        elif name == "create_pipeline":
+            try:
+                from .pipelines import create_pipeline
+                pipe_name = arguments.get("name")
+                steps = arguments.get("steps", [])
+                desc = arguments.get("description", "")
+                if not pipe_name or not steps:
+                    return [TextContent(type="text", text="Error: 'name' and 'steps' are required")]
+                result = create_pipeline(pipe_name, steps, description=desc)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Create pipeline failed: {str(e)}")]
+
+        elif name == "list_pipelines":
+            try:
+                from .pipelines import list_pipelines
+                pipelines = list_pipelines()
+                if not pipelines:
+                    return [TextContent(type="text", text="No pipelines defined.")]
+                lines = [f"**Pipelines ({len(pipelines)}):**\n"]
+                for p in pipelines:
+                    last_run = p["last_run"][:19] if p.get("last_run") else "never"
+                    status = p.get("last_run_status") or "-"
+                    lines.append(f"- **{p['name']}** ({p['step_count']} steps, last run: {last_run}, status: {status})")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List pipelines failed: {str(e)}")]
+
+        elif name == "run_pipeline":
+            try:
+                from .pipelines import run_pipeline
+                pipe_name = arguments.get("name")
+                dry_run = arguments.get("dry_run", False)
+                if not pipe_name:
+                    return [TextContent(type="text", text="Error: 'name' is required")]
+                catalog = get_catalog()
+                engine = get_engine()
+                result = run_pipeline(pipe_name, catalog, engine, dry_run=dry_run)
+                lines = [f"**{result['message']}**\n"]
+                for r in result["step_results"]:
+                    rows = r.get("rows_affected", "-")
+                    if r["status"] == "error":
+                        lines.append(f"- Step {r['step']}: **error** — {r['error']}")
+                    else:
+                        lines.append(f"- Step {r['step']}: {r['status']} ({rows} rows, {r['duration_ms']}ms)")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Run pipeline failed: {str(e)}")]
+
+        elif name == "drop_pipeline":
+            try:
+                from .pipelines import drop_pipeline
+                pipe_name = arguments.get("name")
+                if not pipe_name:
+                    return [TextContent(type="text", text="Error: 'name' is required")]
+                result = drop_pipeline(pipe_name)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Drop pipeline failed: {str(e)}")]
 
         elif name == "dashboard":
             try:

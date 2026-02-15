@@ -2858,6 +2858,139 @@ def lineage_impact(table_name: str):
         console.print(table)
 
 
+# --- Pipeline commands ---
+
+
+@main.group("pipeline")
+def pipeline_group():
+    """Manage data pipelines (multi-step SQL transformations)."""
+    pass
+
+
+@pipeline_group.command("create")
+@click.argument("name")
+@click.option("--steps", required=True, help="JSON array of steps: [{\"sql\":\"...\",\"target_table\":\"...\",\"mode\":\"overwrite\"}]")
+@click.option("--description", "-d", default="", help="Pipeline description")
+def pipeline_create(name: str, steps: str, description: str):
+    """Create a named pipeline."""
+    import json as _json
+    try:
+        from lakehouse.pipelines import create_pipeline
+        parsed_steps = _json.loads(steps)
+        result = create_pipeline(name, parsed_steps, description=description)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except (ValueError, _json.JSONDecodeError) as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@pipeline_group.command("list")
+def pipeline_list():
+    """List all pipelines."""
+    from lakehouse.pipelines import list_pipelines
+    pipelines = list_pipelines()
+    if not pipelines:
+        console.print("[dim]No pipelines defined.[/dim]")
+        return
+
+    table = Table(title="Pipelines")
+    table.add_column("Name", style="cyan")
+    table.add_column("Steps", justify="right")
+    table.add_column("Description")
+    table.add_column("Last Run")
+    table.add_column("Status")
+    for p in pipelines:
+        last_run = p["last_run"][:19] if p.get("last_run") else "never"
+        status = p.get("last_run_status") or "-"
+        table.add_row(p["name"], str(p["step_count"]), p["description"], last_run, status)
+    console.print(table)
+
+
+@pipeline_group.command("show")
+@click.argument("name")
+def pipeline_show(name: str):
+    """Show pipeline definition."""
+    import json as _json
+    try:
+        from lakehouse.pipelines import get_pipeline
+        p = get_pipeline(name)
+        console.print(f"[bold cyan]Pipeline: {p['name']}[/bold cyan]")
+        if p["description"]:
+            console.print(f"  Description: {p['description']}")
+        console.print(f"  Created: {p['created_at'][:19]}")
+        last_run = p["last_run"][:19] if p.get("last_run") else "never"
+        console.print(f"  Last run: {last_run} ({p.get('last_run_status') or '-'})")
+        console.print(f"\n[bold]Steps ({len(p['steps'])}):[/bold]")
+        for i, step in enumerate(p["steps"]):
+            target = step.get("target_table") or "(no target)"
+            mode = step.get("mode", "overwrite")
+            console.print(f"  [{i}] {step['sql']}")
+            console.print(f"      → {target} ({mode})")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@pipeline_group.command("run")
+@click.argument("name")
+@click.option("--dry-run", is_flag=True, help="Validate SQL without executing")
+def pipeline_run(name: str, dry_run: bool):
+    """Run a pipeline."""
+    try:
+        from lakehouse.pipelines import run_pipeline
+        from lakehouse.catalog import get_catalog
+        from lakehouse.query import QueryEngine
+        catalog = get_catalog()
+        engine = QueryEngine(catalog=catalog)
+        result = run_pipeline(name, catalog, engine, dry_run=dry_run)
+
+        if result["steps_failed"] > 0:
+            console.print(f"[bold red]✗ {result['message']}[/bold red]")
+        else:
+            console.print(f"[bold green]✓ {result['message']}[/bold green]")
+
+        table = Table(title="Step Results")
+        table.add_column("Step", justify="right")
+        table.add_column("SQL")
+        table.add_column("Target")
+        table.add_column("Rows", justify="right")
+        table.add_column("Status")
+        table.add_column("Time", justify="right")
+        for r in result["step_results"]:
+            rows = str(r.get("rows_affected", "-"))
+            status_style = "green" if r["status"] in ("completed", "validated") else "red"
+            table.add_row(
+                str(r["step"]),
+                r["sql"][:60],
+                r.get("target_table") or "-",
+                rows,
+                f"[{status_style}]{r['status']}[/{status_style}]",
+                f"{r['duration_ms']}ms",
+            )
+        console.print(table)
+
+        if result["steps_failed"] > 0:
+            for r in result["step_results"]:
+                if r["status"] == "error":
+                    console.print(f"\n[red]Error in step {r['step']}:[/red] {r['error']}")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
+@pipeline_group.command("drop")
+@click.argument("name")
+def pipeline_drop(name: str):
+    """Drop a pipeline."""
+    try:
+        from lakehouse.pipelines import drop_pipeline
+        result = drop_pipeline(name)
+        console.print(f"[bold green]✓ {result['message']}[/bold green]")
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise click.Abort()
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
