@@ -3284,6 +3284,142 @@ def schema_check(table_name: str, add: tuple, drop: tuple, rename: tuple):
             console.print(f"  - {w}")
 
 
+@main.group()
+def retention():
+    """Snapshot retention policy commands."""
+    pass
+
+
+@retention.command("set")
+@click.argument("table_name")
+@click.option("--max-age", type=float, default=None, help="Max snapshot age in hours")
+@click.option("--max-count", type=int, default=None, help="Max number of snapshots to keep")
+@click.option("--min-keep", type=int, default=1, help="Minimum snapshots to always keep (default: 1)")
+def retention_set(table_name: str, max_age: float, max_count: int, min_keep: int):
+    """Set a snapshot retention policy for a table.
+
+    Examples:
+        lakehouse retention set expenses --max-age 168 --max-count 10 --min-keep 2
+    """
+    from .retention import set_retention_policy
+
+    policy = {"min_snapshots_to_keep": min_keep}
+    if max_age is not None:
+        policy["max_snapshot_age_hours"] = max_age
+    if max_count is not None:
+        policy["max_snapshot_count"] = max_count
+
+    result = set_retention_policy(table_name, policy)
+    console.print(f"[green]{result['message']}[/green]")
+    p = result["policy"]
+    if p.get("max_snapshot_age_hours"):
+        console.print(f"  Max age: {p['max_snapshot_age_hours']} hours")
+    if p.get("max_snapshot_count"):
+        console.print(f"  Max count: {p['max_snapshot_count']}")
+    console.print(f"  Min keep: {p['min_snapshots_to_keep']}")
+
+
+@retention.command("show")
+@click.argument("table_name")
+def retention_show(table_name: str):
+    """Show the retention policy for a table.
+
+    Examples:
+        lakehouse retention show expenses
+    """
+    from .retention import get_retention_policy
+
+    result = get_retention_policy(table_name)
+    if result["policy"] is None:
+        console.print(f"No retention policy for '{table_name}'")
+        return
+    p = result["policy"]
+    console.print(f"[bold]Retention Policy: {result['table']}[/bold]")
+    if p.get("max_snapshot_age_hours"):
+        console.print(f"  Max age: {p['max_snapshot_age_hours']} hours")
+    if p.get("max_snapshot_count"):
+        console.print(f"  Max count: {p['max_snapshot_count']}")
+    console.print(f"  Min keep: {p['min_snapshots_to_keep']}")
+    console.print(f"  Created: {p['created_at']}")
+    console.print(f"  Last evaluated: {p.get('last_evaluated') or 'never'}")
+
+
+@retention.command("list")
+def retention_list():
+    """List all retention policies.
+
+    Examples:
+        lakehouse retention list
+    """
+    from .retention import list_retention_policies
+
+    policies = list_retention_policies()
+    if not policies:
+        console.print("No retention policies configured.")
+        return
+
+    table = Table(title="Retention Policies")
+    table.add_column("Table", style="cyan")
+    table.add_column("Max Age (hrs)")
+    table.add_column("Max Count")
+    table.add_column("Min Keep")
+    table.add_column("Last Evaluated", style="dim")
+
+    for p in policies:
+        table.add_row(
+            p["table"],
+            str(p.get("max_snapshot_age_hours") or "-"),
+            str(p.get("max_snapshot_count") or "-"),
+            str(p.get("min_snapshots_to_keep", 1)),
+            str(p.get("last_evaluated") or "never"),
+        )
+    console.print(table)
+
+
+@retention.command("remove")
+@click.argument("table_name")
+def retention_remove(table_name: str):
+    """Remove a retention policy.
+
+    Examples:
+        lakehouse retention remove expenses
+    """
+    from .retention import remove_retention_policy
+
+    result = remove_retention_policy(table_name)
+    console.print(result["message"])
+
+
+@retention.command("run")
+@click.argument("table_name", required=False)
+@click.option("--dry-run", is_flag=True, help="Preview without acting")
+def retention_run(table_name: str, dry_run: bool):
+    """Enforce retention policies.
+
+    Examples:
+        lakehouse retention run
+        lakehouse retention run expenses --dry-run
+    """
+    from .retention import evaluate_retention
+
+    catalog = _get_catalog()
+    results = evaluate_retention(catalog, table_name=table_name, dry_run=dry_run)
+
+    if not results:
+        console.print("No tables with retention policies to evaluate.")
+        return
+
+    for r in results:
+        if r["action"] == "error":
+            console.print(f"[red]{r['table']}: {r['message']}[/red]")
+        elif r["action"] == "no_action":
+            console.print(f"[dim]{r['table']}: {r['message']}[/dim]")
+        elif r["action"] == "would_expire":
+            console.print(f"[yellow]{r['table']}: {r['message']}[/yellow]")
+        elif r["action"] == "expired":
+            console.print(f"[green]{r['table']}: {r['message']}[/green]")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
