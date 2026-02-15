@@ -4711,6 +4711,84 @@ def notify_test(handler_id: str):
         console.print(f"[red]{result['message']}[/red]")
 
 
+@main.group()
+def cache():
+    """Manage query result cache."""
+    pass
+
+
+main.add_command(cache)
+
+
+@cache.command("stats")
+def cache_stats():
+    """Show cache statistics."""
+    from .query_cache import get_cache_stats
+
+    stats = get_cache_stats()
+    console.print(Panel(
+        f"Entries: {stats['total_entries']}  |  "
+        f"In-memory: {stats['in_memory_entries']}  |  "
+        f"Hits: {stats['hits']}  |  "
+        f"Misses: {stats['misses']}  |  "
+        f"Hit rate: {stats['hit_rate']}%",
+        title="Query Cache Stats",
+    ))
+
+
+@cache.command("list")
+@click.option("--limit", default=20, help="Max entries to show")
+def cache_list(limit: int):
+    """List cached queries."""
+    from .query_cache import list_cached_queries
+
+    entries = list_cached_queries(limit=limit)
+    if not entries:
+        console.print("[yellow]No cached queries[/yellow]")
+        return
+
+    table = Table(title="Cached Queries")
+    table.add_column("Key", style="cyan")
+    table.add_column("SQL")
+    table.add_column("Tables")
+    table.add_column("Rows")
+    table.add_column("Hits")
+    table.add_column("TTL Left")
+
+    for e in entries:
+        table.add_row(
+            e["cache_key"][:8],
+            e["sql"][:60],
+            ", ".join(e["tables"]),
+            str(e["row_count"]),
+            str(e["hit_count"]),
+            f"{e['ttl_remaining_seconds']}s",
+        )
+    console.print(table)
+
+
+@cache.command("clear")
+@click.argument("table_name", required=False)
+def cache_clear(table_name: str):
+    """Clear cache for a table or all."""
+    from .query_cache import invalidate
+
+    result = invalidate(table_name=table_name)
+    console.print(result["message"])
+
+
+@cache.command("policy")
+@click.argument("table_name")
+@click.option("--ttl", default=None, type=int, help="TTL in seconds")
+@click.option("--disable", is_flag=True, help="Disable caching for this table")
+def cache_policy(table_name: str, ttl: int, disable: bool):
+    """Set cache policy for a table."""
+    from .query_cache import set_cache_policy
+
+    result = set_cache_policy(table_name, ttl_seconds=ttl, enabled=not disable)
+    console.print(result["message"])
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
