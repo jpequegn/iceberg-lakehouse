@@ -22,6 +22,7 @@ from .stats import compute_table_stats, get_cached_stats, get_all_cached_stats, 
 from .dashboard import get_dashboard
 from .maintenance import set_maintenance_policy, get_maintenance_policy, remove_maintenance_policy, run_maintenance, check_maintenance_needed
 from .views import create_view, list_views, get_view, drop_view, query_view
+from .tagging import tag_table, untag_table, get_tags, search_by_tag, set_table_description, get_table_description, bookmark_table, unbookmark_table, list_bookmarks, search_tables
 
 
 # Initialize server
@@ -1158,6 +1159,65 @@ async def list_tools() -> list[Tool]:
                     "name": {"type": "string", "description": "View name to drop"},
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="tag_table",
+            description="Add or remove tags on a table for organization and discovery.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags to add"},
+                    "remove": {"type": "boolean", "description": "If true, remove the tags instead of adding", "default": False},
+                },
+                "required": ["table_name", "tags"],
+            },
+        ),
+        Tool(
+            name="search_by_tag",
+            description="Find all tables with a given tag.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string", "description": "Tag to search for"},
+                },
+                "required": ["tag"],
+            },
+        ),
+        Tool(
+            name="set_table_description",
+            description="Set a human-readable description for a table.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "description": {"type": "string", "description": "Description text"},
+                },
+                "required": ["table_name", "description"],
+            },
+        ),
+        Tool(
+            name="bookmark_table",
+            description="Bookmark or unbookmark a table for quick access.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "remove": {"type": "boolean", "description": "If true, remove the bookmark", "default": False},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="search_tables",
+            description="Search tables by name, tag, or description. Returns matching tables with metadata.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search string"},
+                },
+                "required": ["query"],
             },
         ),
     ]
@@ -2644,6 +2704,80 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Error: {str(e)}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Drop view failed: {str(e)}")]
+
+        elif name == "tag_table":
+            try:
+                tbl = arguments.get("table_name")
+                tags = arguments.get("tags", [])
+                remove = arguments.get("remove", False)
+                if not tbl or not tags:
+                    return [TextContent(type="text", text="Error: 'table_name' and 'tags' are required")]
+                if remove:
+                    result = untag_table(tbl, tags)
+                else:
+                    result = tag_table(tbl, tags)
+                return [TextContent(type="text", text=f"**{result['message']}**\n\nTags: {', '.join(result['tags'])}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Tag operation failed: {str(e)}")]
+
+        elif name == "search_by_tag":
+            try:
+                tag = arguments.get("tag")
+                if not tag:
+                    return [TextContent(type="text", text="Error: 'tag' is required")]
+                tables = search_by_tag(tag)
+                if not tables:
+                    return [TextContent(type="text", text=f"No tables tagged '{tag}'")]
+                lines = [f"**Tables tagged '{tag}' ({len(tables)}):**\n"]
+                for t in tables:
+                    lines.append(f"- {t}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Search by tag failed: {str(e)}")]
+
+        elif name == "set_table_description":
+            try:
+                tbl = arguments.get("table_name")
+                desc = arguments.get("description", "")
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+                result = set_table_description(tbl, desc)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Set description failed: {str(e)}")]
+
+        elif name == "bookmark_table":
+            try:
+                tbl = arguments.get("table_name")
+                remove = arguments.get("remove", False)
+                if not tbl:
+                    return [TextContent(type="text", text="Error: 'table_name' is required")]
+                if remove:
+                    result = unbookmark_table(tbl)
+                else:
+                    result = bookmark_table(tbl)
+                return [TextContent(type="text", text=f"**{result['message']}**")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Bookmark operation failed: {str(e)}")]
+
+        elif name == "search_tables":
+            try:
+                q = arguments.get("query")
+                if not q:
+                    return [TextContent(type="text", text="Error: 'query' is required")]
+                catalog = get_catalog()
+                results = search_tables(q, catalog=catalog)
+                if not results:
+                    return [TextContent(type="text", text=f"No tables matching '{q}'")]
+                lines = [f"**Search results for '{q}' ({len(results)}):**\n"]
+                for r in results:
+                    tags = f" [{', '.join(r['tags'])}]" if r['tags'] else ""
+                    bmark = " ★" if r['bookmarked'] else ""
+                    desc = f" — {r['description']}" if r['description'] else ""
+                    lines.append(f"- **{r['table']}**{tags}{bmark}{desc}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Search failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
