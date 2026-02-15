@@ -1272,6 +1272,51 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_watermark",
+            description="Get the last-processed snapshot ID for a pipeline/table pair.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pipeline_name": {"type": "string", "description": "Pipeline name"},
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["pipeline_name", "table_name"],
+            },
+        ),
+        Tool(
+            name="list_watermarks",
+            description="List all watermarks, optionally filtered by pipeline.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pipeline_name": {"type": "string", "description": "Filter by pipeline (optional)"},
+                },
+            },
+        ),
+        Tool(
+            name="reset_watermark",
+            description="Reset watermark to force full reprocessing on next pipeline run.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pipeline_name": {"type": "string", "description": "Pipeline name"},
+                    "table_name": {"type": "string", "description": "Table name (optional, omit to reset all)"},
+                },
+                "required": ["pipeline_name"],
+            },
+        ),
+        Tool(
+            name="run_pipeline_incremental",
+            description="Run a pipeline in incremental mode, processing only new data since last watermark.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pipeline_name": {"type": "string", "description": "Pipeline name"},
+                },
+                "required": ["pipeline_name"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -3797,6 +3842,55 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=df.to_markdown(index=False))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Masked query failed: {str(e)}")]
+
+        elif name == "get_watermark":
+            from .incremental import get_watermark as _get_wm
+            try:
+                result = _get_wm(arguments["pipeline_name"], arguments["table_name"])
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get watermark failed: {str(e)}")]
+
+        elif name == "list_watermarks":
+            from .incremental import list_watermarks as _list_wm
+            try:
+                results = _list_wm(pipeline_name=arguments.get("pipeline_name"))
+                if not results:
+                    return [TextContent(type="text", text="No watermarks configured.")]
+                lines = ["## Watermarks\n"]
+                lines.append("| Pipeline | Table | Snapshot | Processed At | Rows |")
+                lines.append("|----------|-------|----------|--------------|------|")
+                for r in results:
+                    lines.append(
+                        f"| {r['pipeline']} | {r['table']} | {r['snapshot_id']} | "
+                        f"{str(r.get('processed_at', ''))[:19]} | {r.get('rows_processed', 0)} |"
+                    )
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List watermarks failed: {str(e)}")]
+
+        elif name == "reset_watermark":
+            from .incremental import reset_watermark as _reset_wm
+            try:
+                result = _reset_wm(arguments["pipeline_name"], table_name=arguments.get("table_name"))
+                return [TextContent(type="text", text=result["message"])]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Reset watermark failed: {str(e)}")]
+
+        elif name == "run_pipeline_incremental":
+            from .incremental import run_pipeline_incremental as _run_inc
+            from .query import QueryEngine
+            try:
+                catalog = get_catalog()
+                engine = QueryEngine(catalog=catalog)
+                result = _run_inc(arguments["pipeline_name"], catalog, engine)
+                lines = [f"## {result['message']}\n"]
+                for s in result["steps"]:
+                    status = s["status"].upper()
+                    lines.append(f"- Step {s['step']}: {status} — {s['message']}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Incremental pipeline failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
