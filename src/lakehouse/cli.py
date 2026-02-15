@@ -1,5 +1,7 @@
 """CLI for Iceberg Lakehouse."""
 
+import json
+
 import click
 from rich.console import Console
 from rich.table import Table
@@ -4583,6 +4585,130 @@ def dedup_report_cmd(table_name: str, keys: str):
 
     if result["suggested_keys"]:
         console.print(f"\n[bold]Suggested dedup keys:[/bold] {', '.join(result['suggested_keys'])}")
+
+
+@main.group()
+def notify():
+    """Manage event notifications and handlers."""
+    pass
+
+
+main.add_command(notify)
+
+
+@notify.command("add")
+@click.argument("table_name")
+@click.option("--event", required=True, type=click.Choice(["write", "schema_change", "sla_violation", "maintenance", "all"]))
+@click.option("--type", "handler_type", required=True, type=click.Choice(["webhook", "shell", "log"]))
+@click.option("--url", default=None, help="Webhook URL (for webhook type)")
+@click.option("--command", default=None, help="Shell command (for shell type)")
+@click.option("--file", "log_file", default=None, help="Log file path (for log type)")
+def notify_add(table_name: str, event: str, handler_type: str, url: str, command: str, log_file: str):
+    """Register a notification handler for table events."""
+    from .notifications import register_handler
+
+    config = {}
+    if handler_type == "webhook":
+        if not url:
+            raise click.UsageError("--url required for webhook handler")
+        config["url"] = url
+    elif handler_type == "shell":
+        if not command:
+            raise click.UsageError("--command required for shell handler")
+        config["command"] = command
+    elif handler_type == "log":
+        if not log_file:
+            raise click.UsageError("--file required for log handler")
+        config["file"] = log_file
+
+    result = register_handler(table_name, event, handler_type, config)
+    console.print(f"[green]{result['message']}[/green]")
+    console.print(f"Handler ID: [bold]{result['handler_id']}[/bold]")
+
+
+@notify.command("list")
+@click.option("--table", default=None, help="Filter by table name")
+def notify_list(table: str):
+    """List registered notification handlers."""
+    from .notifications import list_handlers
+
+    handlers = list_handlers(table_name=table)
+    if not handlers:
+        console.print("[yellow]No handlers registered[/yellow]")
+        return
+
+    table_obj = Table(title="Notification Handlers")
+    table_obj.add_column("ID", style="cyan")
+    table_obj.add_column("Table")
+    table_obj.add_column("Event")
+    table_obj.add_column("Type")
+    table_obj.add_column("Config")
+    table_obj.add_column("Created")
+
+    for h in handlers:
+        config_str = json.dumps(h["config"], default=str)[:50]
+        table_obj.add_row(
+            h["handler_id"],
+            h["table"],
+            h["event_type"],
+            h["handler_type"],
+            config_str,
+            h.get("created_at", "")[:19],
+        )
+    console.print(table_obj)
+
+
+@notify.command("remove")
+@click.argument("handler_id")
+def notify_remove(handler_id: str):
+    """Remove a registered handler."""
+    from .notifications import remove_handler
+
+    result = remove_handler(handler_id)
+    console.print(result["message"])
+
+
+@notify.command("history")
+@click.option("--table", default=None, help="Filter by table name")
+@click.option("--event", default=None, help="Filter by event type")
+@click.option("--limit", default=20, help="Max entries to show")
+def notify_history(table: str, event: str, limit: int):
+    """Show event notification history."""
+    from .notifications import get_event_history
+
+    history = get_event_history(table_name=table, event_type=event, limit=limit)
+    if not history:
+        console.print("[yellow]No event history[/yellow]")
+        return
+
+    table_obj = Table(title="Event History")
+    table_obj.add_column("Time", style="cyan")
+    table_obj.add_column("Table")
+    table_obj.add_column("Event")
+    table_obj.add_column("Handlers")
+
+    for entry in history:
+        table_obj.add_row(
+            entry.get("fired_at", "")[:19],
+            entry["table"],
+            entry["event_type"],
+            str(entry["handlers_triggered"]),
+        )
+    console.print(table_obj)
+
+
+@notify.command("test")
+@click.argument("handler_id")
+def notify_test(handler_id: str):
+    """Send a test event to a handler."""
+    from .notifications import send_test_event
+
+    result = send_test_event(handler_id)
+    status = result.get("result", {}).get("status", "unknown")
+    if status == "success":
+        console.print(f"[green]{result['message']}[/green]")
+    else:
+        console.print(f"[red]{result['message']}[/red]")
 
 
 @main.command()
