@@ -1071,6 +1071,68 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="schema_history",
+            description="Get the full schema evolution history for a table, showing how its schema changed across snapshots.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="schema_diff",
+            description="Compare schemas between two snapshots to see what columns were added, dropped, renamed, or had type changes.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "from_snapshot": {"type": "integer", "description": "Starting snapshot ID (optional)"},
+                    "to_snapshot": {"type": "integer", "description": "Ending snapshot ID (optional)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="schema_migration",
+            description="Generate migration steps (alter_table operations) between two schema versions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "from_snapshot": {"type": "integer", "description": "Starting snapshot ID (optional)"},
+                    "to_snapshot": {"type": "integer", "description": "Ending snapshot ID (optional)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="schema_compatibility",
+            description="Check if proposed schema changes are backward-compatible with the current table schema.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "changes": {
+                        "type": "array",
+                        "description": "List of proposed changes",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {"type": "string", "enum": ["add_column", "drop_column", "rename_column"]},
+                                "column": {"type": "string"},
+                                "type": {"type": "string"},
+                                "new_name": {"type": "string"},
+                            },
+                            "required": ["op", "column"],
+                        },
+                    },
+                },
+                "required": ["table_name", "changes"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -3364,6 +3426,91 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Quality report failed: {str(e)}")]
+
+        elif name == "schema_history":
+            from .schema_evolution import get_schema_history
+            try:
+                catalog = get_catalog()
+                history = get_schema_history(catalog, arguments["table_name"])
+                lines = [f"## Schema History: {arguments['table_name']}\n"]
+                for entry in history:
+                    fields = ", ".join(f["name"] for f in entry["fields"])
+                    change = f" — {entry['change_summary']}" if entry["change_summary"] else ""
+                    ts = entry["timestamp"][:19] if entry["timestamp"] else "no snapshot"
+                    lines.append(f"- **Schema {entry['schema_id']}** ({ts}): {fields}{change}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Schema history failed: {str(e)}")]
+
+        elif name == "schema_diff":
+            from .schema_evolution import schema_diff as _schema_diff
+            try:
+                catalog = get_catalog()
+                diff = _schema_diff(
+                    catalog, arguments["table_name"],
+                    from_snapshot=arguments.get("from_snapshot"),
+                    to_snapshot=arguments.get("to_snapshot"),
+                )
+                lines = [
+                    f"## Schema Diff: {diff['table']}\n",
+                    f"From schema {diff['from_schema_id']} → {diff['to_schema_id']}",
+                    f"Summary: {diff['summary']}\n",
+                ]
+                for c in diff["added_columns"]:
+                    lines.append(f"+ Added: {c['name']} ({c['type']})")
+                for c in diff["dropped_columns"]:
+                    lines.append(f"- Dropped: {c['name']} ({c['type']})")
+                for c in diff["renamed_columns"]:
+                    lines.append(f"~ Renamed: {c['old_name']} → {c['new_name']}")
+                for c in diff["type_changes"]:
+                    lines.append(f"~ Type changed: {c['name']}: {c['old_type']} → {c['new_type']}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Schema diff failed: {str(e)}")]
+
+        elif name == "schema_migration":
+            from .schema_evolution import generate_migration
+            try:
+                catalog = get_catalog()
+                result = generate_migration(
+                    catalog, arguments["table_name"],
+                    from_snapshot=arguments.get("from_snapshot"),
+                    to_snapshot=arguments.get("to_snapshot"),
+                )
+                lines = [f"## {result['message']}\n"]
+                for i, step in enumerate(result["steps"], 1):
+                    details = ""
+                    if step["operation"] == "add_column":
+                        details = f" (type: {step['column_type']})"
+                    elif step["operation"] == "rename_column":
+                        details = f" → {step['new_name']}"
+                    lines.append(f"{i}. {step['operation']} `{step['column_name']}`{details}")
+                if not result["steps"]:
+                    lines.append("No migration steps needed.")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Schema migration failed: {str(e)}")]
+
+        elif name == "schema_compatibility":
+            from .schema_evolution import check_schema_compatibility
+            try:
+                catalog = get_catalog()
+                result = check_schema_compatibility(
+                    catalog, arguments["table_name"], arguments["changes"],
+                )
+                status = "Compatible" if result["compatible"] else "NOT Compatible"
+                lines = [f"## Schema Compatibility: {status}\n", result["message"], ""]
+                if result["breaking_changes"]:
+                    lines.append("**Breaking changes:**")
+                    for bc in result["breaking_changes"]:
+                        lines.append(f"- {bc}")
+                if result["warnings"]:
+                    lines.append("**Warnings:**")
+                    for w in result["warnings"]:
+                        lines.append(f"- {w}")
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Schema compatibility check failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
