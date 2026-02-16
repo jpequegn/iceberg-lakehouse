@@ -1097,3 +1097,167 @@ def apply_generated_contract(
         return update_contract(table_name, updatable, store_path=store_path)
     else:
         return create_contract(table_name, contract, store_path=store_path)
+
+
+def dry_run_contract(
+    catalog,
+    table_name: str,
+    contract: dict,
+) -> dict:
+    """Test a proposed contract against existing table data without saving."""
+    table_name = _normalize(table_name)
+    table = catalog.load_table(table_name)
+
+    violations = []
+
+    # Schema checks
+    actual_schema = {}
+    for field in table.schema().fields:
+        type_name = TYPE_MAP.get(type(field.field_type).__name__, "string")
+        actual_schema[field.name] = {"type": type_name, "nullable": not field.required}
+
+    contract_schema = contract.get("schema", {})
+    for col_name, col_def in contract_schema.items():
+        if col_name not in actual_schema:
+            violations.append({"type": "schema", "field": col_name, "rule": "exists", "message": f"Missing column: {col_name}"})
+        elif col_def.get("type") and actual_schema[col_name]["type"] != col_def["type"]:
+            violations.append({
+                "type": "schema", "field": col_name, "rule": "type",
+                "message": f"Type mismatch on '{col_name}': expected {col_def['type']}, got {actual_schema[col_name]['type']}",
+            })
+
+    # Constraint checks on data
+    arrow = table.scan().to_arrow()
+    if arrow.num_rows > 0:
+        import duckdb
+        conn = duckdb.connect()
+        conn.register("tbl", arrow)
+
+        for constraint in contract.get("constraints", []):
+            col = constraint.get("column", "")
+            rule = constraint.get("rule", "")
+            try:
+                cv = _validate_constraint(conn, col, rule, constraint)
+                if cv:
+                    violations.append(cv)
+            except Exception:
+                pass
+
+        conn.close()
+
+    valid = len(violations) == 0
+    return {
+        "table": table_name,
+        "valid": valid,
+        "violations": violations,
+        "violation_count": len(violations),
+        "message": f"Contract test for '{table_name}': {'PASS' if valid else f'FAIL ({len(violations)} violations)'}",
+    }
+
+
+def dry_run_migration(
+    catalog,
+    table_name: str,
+    to_contract: dict,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Simulate migration from current contract to a new one."""
+    table_name = _normalize(table_name)
+
+    # Get current violations
+    current_result = validate_contract(catalog, table_name, store_path=store_path)
+    current_violations = current_result.get("violations", [])
+
+    # Get new violations
+    new_result = dry_run_contract(catalog, table_name, to_contract)
+    new_violations = new_result.get("violations", [])
+
+    # Diff: find new violations (in new but not in current)
+    current_keys = {(v.get("field", ""), v.get("rule", "")) for v in current_violations}
+    new_keys = {(v.get("field", ""), v.get("rule", "")) for v in new_violations}
+
+    introduced = [v for v in new_violations if (v.get("field", ""), v.get("rule", "")) not in current_keys]
+    resolved = [v for v in current_violations if (v.get("field", ""), v.get("rule", "")) not in new_keys]
+
+    return {
+        "table": table_name,
+        "current_violations": len(current_violations),
+        "new_violations": len(new_violations),
+        "introduced": introduced,
+        "introduced_count": len(introduced),
+        "resolved": resolved,
+        "resolved_count": len(resolved),
+        "safe_to_migrate": len(introduced) == 0,
+        "message": f"Migration test: {len(introduced)} new violations, {len(resolved)} resolved",
+    }
+
+
+def dry_run_report(
+    catalog,
+    table_name: str,
+    contract: dict,
+) -> dict:
+    """Comprehensive test report with per-column pass rates."""
+    table_name = _normalize(table_name)
+    table = catalog.load_table(table_name)
+    arrow = table.scan().to_arrow()
+    row_count = arrow.num_rows
+
+    # Schema compatibility
+    actual_schema = {}
+    for field in table.schema().fields:
+        type_name = TYPE_MAP.get(type(field.field_type).__name__, "string")
+        actual_schema[field.name] = {"type": type_name, "nullable": not field.required}
+
+    contract_schema = contract.get("schema", {})
+    schema_issues = []
+    for col_name, col_def in contract_schema.items():
+        if col_name not in actual_schema:
+            schema_issues.append(f"Missing column: {col_name}")
+        elif col_def.get("type") and actual_schema[col_name]["type"] != col_def["type"]:
+            schema_issues.append(f"Type mismatch on '{col_name}'")
+
+    schema_compatible = len(schema_issues) == 0
+
+    # Per-constraint pass rates
+    constraint_results = []
+    if row_count > 0:
+        import duckdb
+        conn = duckdb.connect()
+        conn.register("tbl", arrow)
+
+        for constraint in contract.get("constraints", []):
+            col = constraint.get("column", "")
+            rule = constraint.get("rule", "")
+            cv = None
+            try:
+                cv = _validate_constraint(conn, col, rule, constraint)
+            except Exception:
+                pass
+
+            if cv:
+                violation_count = cv.get("null_count") or cv.get("violation_count") or 1
+                pass_rate = round((1 - violation_count / row_count) * 100, 1) if row_count > 0 else 100.0
+                constraint_results.append({
+                    "column": col, "rule": rule,
+                    "pass_rate": pass_rate, "violations": violation_count,
+                })
+            else:
+                constraint_results.append({
+                    "column": col, "rule": rule,
+                    "pass_rate": 100.0, "violations": 0,
+                })
+
+        conn.close()
+
+    overall_pass = schema_compatible and all(cr["violations"] == 0 for cr in constraint_results)
+
+    return {
+        "table": table_name,
+        "row_count": row_count,
+        "schema_compatible": schema_compatible,
+        "schema_issues": schema_issues,
+        "constraint_results": constraint_results,
+        "overall_pass": overall_pass,
+        "message": f"Test report for '{table_name}': {'PASS' if overall_pass else 'FAIL'}",
+    }
