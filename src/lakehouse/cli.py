@@ -1,6 +1,7 @@
 """CLI for Iceberg Lakehouse."""
 
 import json
+from pathlib import Path
 
 import click
 from rich.console import Console
@@ -5001,6 +5002,131 @@ def auto_refresh_history(table: str, limit: int):
             str(h["errors"]),
         )
     console.print(table_obj)
+
+
+@main.group()
+def contract():
+    """Manage data contracts."""
+    pass
+
+
+main.add_command(contract)
+
+
+@contract.command("create")
+@click.argument("table_name")
+@click.option("--file", "schema_file", required=True, help="JSON file with contract definition")
+def contract_create(table_name: str, schema_file: str):
+    """Create a contract from a JSON file."""
+    from .contracts import create_contract
+
+    contract_data = json.loads(Path(schema_file).read_text())
+    result = create_contract(table_name, contract_data)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@contract.command("show")
+@click.argument("table_name")
+def contract_show(table_name: str):
+    """Show contract details."""
+    from .contracts import get_contract
+
+    result = get_contract(table_name)
+    if result is None:
+        console.print(f"[yellow]No contract for '{table_name}'[/yellow]")
+        return
+
+    console.print(Panel(json.dumps(result, indent=2, default=str), title=f"Contract: {result['table']}"))
+
+
+@contract.command("list")
+@click.option("--namespace", default=None, help="Filter by namespace")
+def contract_list(namespace: str):
+    """List contracts."""
+    from .contracts import list_contracts
+
+    contracts = list_contracts(namespace=namespace)
+    if not contracts:
+        console.print("[yellow]No contracts defined[/yellow]")
+        return
+
+    table = Table(title="Data Contracts")
+    table.add_column("Table", style="cyan")
+    table.add_column("Owner")
+    table.add_column("Status")
+    table.add_column("Version")
+    table.add_column("Description")
+    table.add_column("Updated")
+
+    for c in contracts:
+        table.add_row(
+            c["table"],
+            c.get("owner", ""),
+            c.get("status", "active"),
+            str(c.get("version", 1)),
+            c.get("description", "")[:40],
+            c.get("updated_at", "")[:19],
+        )
+    console.print(table)
+
+
+@contract.command("update")
+@click.argument("table_name")
+@click.option("--file", "update_file", required=True, help="JSON file with fields to update")
+def contract_update(table_name: str, update_file: str):
+    """Update contract fields from a JSON file."""
+    from .contracts import update_contract
+
+    updates = json.loads(Path(update_file).read_text())
+    result = update_contract(table_name, updates)
+    console.print(f"[green]{result['message']}[/green]")
+
+
+@contract.command("remove")
+@click.argument("table_name")
+def contract_remove(table_name: str):
+    """Remove a contract."""
+    from .contracts import remove_contract
+
+    result = remove_contract(table_name)
+    console.print(result["message"])
+
+
+@contract.command("summary")
+@click.argument("table_name")
+def contract_summary(table_name: str):
+    """Show contract terms vs current table state."""
+    from .catalog import get_catalog
+    from .contracts import get_contract_summary
+
+    catalog = get_catalog()
+    result = get_contract_summary(catalog, table_name)
+
+    if not result.get("has_contract"):
+        console.print(f"[yellow]{result['message']}[/yellow]")
+        return
+
+    console.print(f"[bold]{result['message']}[/bold]")
+    console.print(f"  Version: {result['version']}  |  Status: {result['status']}  |  Owner: {result.get('owner', 'N/A')}")
+
+    if result["schema_issues"]:
+        console.print("\n[red]Schema Issues:[/red]")
+        for issue in result["schema_issues"]:
+            console.print(f"  - {issue}")
+    else:
+        console.print("\n[green]Schema: OK[/green]")
+
+    if result.get("quality_check"):
+        qc = result["quality_check"]
+        if "error" not in qc:
+            status = "[green]PASS[/green]" if qc["passing"] else "[red]FAIL[/red]"
+            console.print(f"  Quality: {qc['current_score']:.0f}/{qc['min_score']} {status}")
+
+    if result.get("freshness_check"):
+        fc = result["freshness_check"]
+        if "error" not in fc:
+            status = "[green]PASS[/green]" if fc["passing"] else "[red]FAIL[/red]"
+            console.print(f"  Freshness: {fc['current_age_hours']:.1f}h / {fc['max_age_hours']}h max {status}")
 
 
 @main.command()
