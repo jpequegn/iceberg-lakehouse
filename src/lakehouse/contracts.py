@@ -982,3 +982,118 @@ def get_contract_coverage(
         "uncovered_tables": uncovered,
         "message": f"Contract coverage: {len(contracted)}/{total} tables ({coverage_pct}%)",
     }
+
+
+ENUM_MAX_DISTINCT = 20
+
+
+def generate_contract(
+    catalog,
+    table_name: str,
+    strict: bool = False,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Analyze a table and generate a draft contract, saving it."""
+    contract = preview_contract(catalog, table_name, strict=strict)
+    create_contract(table_name, contract, store_path=store_path)
+    return {"table": _normalize(table_name), "contract": contract, "message": f"Generated contract for '{_normalize(table_name)}'"}
+
+
+def preview_contract(
+    catalog,
+    table_name: str,
+    strict: bool = False,
+) -> dict:
+    """Generate a draft contract without saving it."""
+    from .catalog import profile_table
+
+    table_name = _normalize(table_name)
+    table = catalog.load_table(table_name)
+    profile = profile_table(catalog, table_name)
+    row_count = profile.get("row_count", 0)
+
+    # Infer schema
+    schema = {}
+    for field in table.schema().fields:
+        type_name = TYPE_MAP.get(type(field.field_type).__name__, "string")
+        col_stats = profile.get("columns", {}).get(field.name, {})
+        null_count = col_stats.get("nulls", 0)
+
+        if strict:
+            nullable = null_count > 0 if row_count > 0 else True
+        else:
+            nullable = not field.required
+
+        schema[field.name] = {"type": type_name, "nullable": nullable}
+
+    # Infer constraints
+    constraints = []
+    for field in table.schema().fields:
+        col_stats = profile.get("columns", {}).get(field.name, {})
+        null_count = col_stats.get("nulls", 0)
+        unique_count = col_stats.get("unique", 0)
+        col_type = col_stats.get("type", "")
+
+        # Not-null constraint
+        if row_count > 0 and null_count == 0:
+            constraints.append({"column": field.name, "rule": "not_null"})
+        elif strict and row_count > 0 and null_count / row_count < 0.01:
+            constraints.append({"column": field.name, "rule": "not_null"})
+
+        # Range constraint for numeric
+        if col_type in ("long", "double", "int", "float") and "min" in col_stats and "max" in col_stats:
+            min_val = col_stats["min"]
+            max_val = col_stats["max"]
+            if min_val is not None and max_val is not None:
+                if strict:
+                    constraints.append({"column": field.name, "rule": "range", "min": min_val, "max": max_val})
+                else:
+                    # Add 10% buffer
+                    span = max_val - min_val if max_val != min_val else abs(max_val) * 0.1 or 1
+                    constraints.append({
+                        "column": field.name, "rule": "range",
+                        "min": round(min_val - span * 0.1, 4),
+                        "max": round(max_val + span * 0.1, 4),
+                    })
+
+        # Enum constraint for low-cardinality strings
+        if col_type == "string" and 0 < unique_count <= ENUM_MAX_DISTINCT:
+            top_values = col_stats.get("top_values", {})
+            if top_values:
+                constraints.append({"column": field.name, "rule": "enum", "values": list(top_values.keys())})
+
+    contract = {
+        "schema": schema,
+        "constraints": constraints,
+        "description": f"Auto-generated contract for '{table_name}'",
+    }
+
+    # Quality baseline
+    try:
+        from .quality import compute_quality_score
+        qr = compute_quality_score(catalog, table_name)
+        score = qr.get("score", 100)
+        threshold = int(score + 5) if strict else max(int(score - 10), 0)
+        contract["quality"] = {"min_score": threshold}
+    except Exception:
+        pass
+
+    return contract
+
+
+def apply_generated_contract(
+    catalog,
+    table_name: str,
+    contract: dict,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Apply a generated/modified contract (create or update)."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+
+    if table_name in store:
+        # Update existing
+        updatable = {k: v for k, v in contract.items() if k in {"schema", "quality", "freshness", "constraints", "owner", "description"}}
+        return update_contract(table_name, updatable, store_path=store_path)
+    else:
+        return create_contract(table_name, contract, store_path=store_path)

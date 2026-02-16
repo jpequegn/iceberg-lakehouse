@@ -5388,6 +5388,39 @@ def contract_coverage():
             console.print(f"  - {t}")
 
 
+@contract.command("generate")
+@click.argument("table_name")
+@click.option("--strict", is_flag=True, help="Use tighter thresholds")
+@click.option("--preview", "preview_only", is_flag=True, help="Preview without saving")
+def contract_generate(table_name: str, strict: bool, preview_only: bool):
+    """Generate a contract from live data."""
+    from .catalog import get_catalog
+    from .contracts import generate_contract, preview_contract
+
+    catalog = get_catalog()
+    if preview_only:
+        contract = preview_contract(catalog, table_name, strict=strict)
+        console.print(json.dumps(contract, indent=2, default=str))
+    else:
+        result = generate_contract(catalog, table_name, strict=strict)
+        console.print(f"[green]{result['message']}[/green]")
+        console.print(json.dumps(result["contract"], indent=2, default=str))
+
+
+@contract.command("apply")
+@click.argument("table_name")
+@click.option("--file", "file_path", required=True, help="Path to contract JSON file")
+def contract_apply(table_name: str, file_path: str):
+    """Apply a contract from a JSON file."""
+    from .catalog import get_catalog
+    from .contracts import apply_generated_contract
+
+    catalog = get_catalog()
+    contract = json.loads(Path(file_path).read_text())
+    result = apply_generated_contract(catalog, table_name, contract)
+    console.print(f"[green]{result['message']}[/green]")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
