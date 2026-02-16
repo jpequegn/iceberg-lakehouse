@@ -5275,6 +5275,55 @@ def contract_status(table_name: str):
         console.print(f"  Sunset: {result['sunset_date']}")
 
 
+@contract.command("monitor")
+@click.argument("table_name")
+def contract_monitor(table_name: str):
+    """Run compliance check and show results."""
+    from .catalog import get_catalog
+    from .contracts import monitor_contract
+
+    catalog = get_catalog()
+    result = monitor_contract(catalog, table_name)
+
+    if not result["checked"]:
+        console.print(f"[yellow]{result['message']}[/yellow]")
+        return
+
+    if result["passed"]:
+        console.print(f"[green]{result['message']}[/green]")
+    else:
+        console.print(f"[red]{result['message']}[/red]")
+        for v in result["violations"]:
+            console.print(f"  - {v['message']}")
+
+
+@contract.command("compliance")
+@click.argument("table_name")
+def contract_compliance(table_name: str):
+    """Show compliance score and history."""
+    from .catalog import get_catalog
+    from .contracts import get_compliance_score, get_compliance_history
+
+    catalog = get_catalog()
+    score = get_compliance_score(catalog, table_name)
+
+    if score["score"] is None:
+        console.print(f"[yellow]{score['message']}[/yellow]")
+        return
+
+    color = "green" if score["score"] >= 80 else "yellow" if score["score"] >= 50 else "red"
+    console.print(f"[bold]Compliance Score: [{color}]{score['score']}/100[/{color}][/bold]")
+    console.print(f"  Schema: {score['schema_ratio']:.0%}  |  Constraints: {score['constraint_ratio']:.0%}")
+    console.print(f"  Quality: {score['quality_ratio']:.0%}  |  Freshness: {score['freshness_ratio']:.0%}")
+
+    history = get_compliance_history(table_name, limit=5)
+    if history:
+        console.print("\n[bold]Recent Checks:[/bold]")
+        for h in history:
+            status = "[green]PASS[/green]" if h["passed"] else f"[red]FAIL ({h['violation_count']})[/red]"
+            console.print(f"  {h['checked_at'][:19]}  {status}")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

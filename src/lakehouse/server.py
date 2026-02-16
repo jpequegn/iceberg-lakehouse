@@ -1802,6 +1802,28 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="monitor_contract",
+            description="Run a full compliance check on a table's contract and record the result. Fires notification events on violations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="get_compliance_score",
+            description="Compute a 0-100 compliance score for a table's contract: weighted schema match, constraint pass rate, quality, freshness.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
             name="validate_contract",
             description="Validate current table state against its data contract. Checks schema conformance and constraint compliance.",
             inputSchema={
@@ -4996,6 +5018,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Diff contract versions failed: {str(e)}")]
+
+        elif name == "monitor_contract":
+            try:
+                from .contracts import monitor_contract
+                catalog = get_catalog()
+                result = monitor_contract(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Monitor contract failed: {str(e)}")]
+
+        elif name == "get_compliance_score":
+            try:
+                from .contracts import get_compliance_score
+                catalog = get_catalog()
+                result = get_compliance_score(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get compliance score failed: {str(e)}")]
 
         elif name == "validate_contract":
             try:

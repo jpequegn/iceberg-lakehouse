@@ -663,3 +663,179 @@ def get_contract_status(
         result["deprecated_at"] = entry.get("deprecated_at", "")
 
     return result
+
+
+MAX_COMPLIANCE_HISTORY = 100
+
+
+def monitor_contract(
+    catalog,
+    table_name: str,
+    store_path: Optional[Path] = None,
+    notification_store_path: Optional[Path] = None,
+) -> dict:
+    """Run a full compliance check and record the result."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return {"table": table_name, "checked": False, "message": f"No contract for '{table_name}'"}
+
+    # Run full validation
+    validation = validate_contract(catalog, table_name, store_path=store_path)
+    summary = get_contract_summary(catalog, table_name, store_path=store_path)
+
+    violations = list(validation.get("violations", []))
+
+    # Quality check
+    qc = summary.get("quality_check")
+    quality_passing = True
+    if qc and "error" not in qc and not qc.get("passing", True):
+        quality_passing = False
+        violations.append({
+            "type": "quality", "rule": "min_score",
+            "message": f"Quality score {qc['current_score']:.0f} below threshold {qc['min_score']}",
+        })
+
+    # Freshness check
+    fc = summary.get("freshness_check")
+    freshness_passing = True
+    if fc and "error" not in fc and not fc.get("passing", True):
+        freshness_passing = False
+        violations.append({
+            "type": "freshness", "rule": "max_age_hours",
+            "message": f"Table age {fc['current_age_hours']:.1f}h exceeds max {fc['max_age_hours']}h",
+        })
+
+    passed = len(violations) == 0
+
+    # Record in compliance history
+    record = {
+        "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "passed": passed,
+        "violation_count": len(violations),
+        "violations": violations,
+    }
+    entry.setdefault("_compliance_history", []).append(record)
+    entry["_compliance_history"] = entry["_compliance_history"][-MAX_COMPLIANCE_HISTORY:]
+    _save_store(store, store_path)
+
+    # Fire notification event on violations
+    if not passed:
+        try:
+            from .notifications import fire_event
+            fire_event(
+                table_name, "contract_violation",
+                {"violation_count": len(violations), "violations": violations[:5]},
+                store_path=notification_store_path,
+            )
+        except Exception:
+            pass  # Notifications are best-effort
+
+    return {
+        "table": table_name,
+        "checked": True,
+        "passed": passed,
+        "violation_count": len(violations),
+        "violations": violations,
+        "message": f"Compliance check for '{table_name}': {'PASS' if passed else f'FAIL ({len(violations)} violations)'}",
+    }
+
+
+def get_compliance_history(
+    table_name: str,
+    limit: int = 20,
+    store_path: Optional[Path] = None,
+) -> list[dict]:
+    """Get history of compliance check results."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return []
+
+    history = entry.get("_compliance_history", [])
+    return list(reversed(history))[:limit]
+
+
+def get_compliance_score(
+    catalog,
+    table_name: str,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Compute a 0-100 compliance score."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return {"table": table_name, "score": None, "message": f"No contract for '{table_name}'"}
+
+    # Schema match ratio
+    contract_schema = entry.get("schema", {})
+    if contract_schema:
+        table = catalog.load_table(table_name)
+        actual_cols = {f.name for f in table.schema().fields}
+        actual_types = {}
+        for f in table.schema().fields:
+            actual_types[f.name] = TYPE_MAP.get(type(f.field_type).__name__, "string")
+
+        matching = 0
+        for col, col_def in contract_schema.items():
+            if col in actual_cols:
+                if not col_def.get("type") or actual_types.get(col) == col_def["type"]:
+                    matching += 1
+        schema_ratio = matching / len(contract_schema) if contract_schema else 1.0
+    else:
+        schema_ratio = 1.0
+
+    # Constraint pass ratio
+    constraints = entry.get("constraints", [])
+    if constraints:
+        validation = validate_contract(catalog, table_name, store_path=store_path)
+        constraint_violations = [v for v in validation.get("violations", []) if v.get("type") == "constraint"]
+        constraint_ratio = max(0.0, 1.0 - len(constraint_violations) / len(constraints))
+    else:
+        constraint_ratio = 1.0
+
+    # Quality ratio
+    quality_config = entry.get("quality", {})
+    if quality_config.get("min_score"):
+        try:
+            from .quality import compute_quality_score
+            qr = compute_quality_score(catalog, table_name)
+            current_score = qr.get("score", 100)
+            quality_ratio = min(1.0, current_score / quality_config["min_score"])
+        except Exception:
+            quality_ratio = 1.0
+    else:
+        quality_ratio = 1.0
+
+    # Freshness ratio
+    freshness_config = entry.get("freshness", {})
+    if freshness_config.get("max_age_hours"):
+        try:
+            from .sla import check_sla
+            sla_result = check_sla(catalog, table_name)
+            age_hours = sla_result.get("age_hours", 0)
+            max_hours = freshness_config["max_age_hours"]
+            freshness_ratio = min(1.0, max(0.0, 1.0 - (age_hours - max_hours) / max_hours)) if age_hours > max_hours else 1.0
+        except Exception:
+            freshness_ratio = 1.0
+    else:
+        freshness_ratio = 1.0
+
+    score = (schema_ratio * 0.3 + constraint_ratio * 0.3 + quality_ratio * 0.2 + freshness_ratio * 0.2) * 100
+    score = round(score, 1)
+
+    return {
+        "table": table_name,
+        "score": score,
+        "schema_ratio": round(schema_ratio, 3),
+        "constraint_ratio": round(constraint_ratio, 3),
+        "quality_ratio": round(quality_ratio, 3),
+        "freshness_ratio": round(freshness_ratio, 3),
+        "message": f"Compliance score for '{table_name}': {score}/100",
+    }

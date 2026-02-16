@@ -10,7 +10,7 @@ from typing import Optional
 
 DEFAULT_NOTIFICATIONS_PATH = Path.home() / ".lakehouse" / "notifications.json"
 MAX_HISTORY = 200
-VALID_EVENT_TYPES = {"write", "schema_change", "sla_violation", "maintenance", "all"}
+VALID_EVENT_TYPES = {"write", "schema_change", "sla_violation", "maintenance", "contract_violation", "all"}
 VALID_HANDLER_TYPES = {"webhook", "shell", "log"}
 
 
