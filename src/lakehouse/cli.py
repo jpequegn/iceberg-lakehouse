@@ -5129,6 +5129,70 @@ def contract_summary(table_name: str):
             console.print(f"  Freshness: {fc['current_age_hours']:.1f}h / {fc['max_age_hours']}h max {status}")
 
 
+@contract.command("validate")
+@click.argument("table_name")
+def contract_validate(table_name: str):
+    """Validate table state against its contract."""
+    from .catalog import get_catalog
+    from .contracts import validate_contract
+
+    catalog = get_catalog()
+    result = validate_contract(catalog, table_name)
+
+    if result["valid"]:
+        console.print(f"[green]{result['message']}[/green]")
+    else:
+        console.print(f"[red]{result['message']}[/red]")
+        table = Table(title="Violations")
+        table.add_column("Type")
+        table.add_column("Field")
+        table.add_column("Rule")
+        table.add_column("Message")
+        for v in result["violations"]:
+            table.add_row(v.get("type", ""), v.get("field", ""), v.get("rule", ""), v.get("message", ""))
+        console.print(table)
+
+
+@contract.command("check-data")
+@click.argument("table_name")
+@click.argument("rows_json")
+def contract_check_data(table_name: str, rows_json: str):
+    """Validate rows (JSON array) against a contract before writing."""
+    from .contracts import validate_data_against_contract
+
+    rows = json.loads(rows_json)
+    result = validate_data_against_contract(table_name, rows)
+
+    if result["valid"]:
+        console.print(f"[green]{result['message']}[/green]")
+    else:
+        console.print(f"[red]{result['message']}[/red]")
+        for v in result["violations"]:
+            console.print(f"  - {v['message']}")
+
+
+@contract.command("violations")
+@click.argument("table_name")
+def contract_violations(table_name: str):
+    """Show all current violations for a table."""
+    from .catalog import get_catalog
+    from .contracts import get_contract_violations
+
+    catalog = get_catalog()
+    result = get_contract_violations(catalog, table_name)
+
+    console.print(f"[bold]{result['message']}[/bold]")
+    if result["violations"]:
+        table = Table(title="Violations")
+        table.add_column("Type")
+        table.add_column("Field")
+        table.add_column("Rule")
+        table.add_column("Message")
+        for v in result["violations"]:
+            table.add_row(v.get("type", ""), str(v.get("field", "")), v.get("rule", ""), v.get("message", ""))
+        console.print(table)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

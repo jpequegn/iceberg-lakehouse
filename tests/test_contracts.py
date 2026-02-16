@@ -9,6 +9,9 @@ from lakehouse.contracts import (
     update_contract,
     remove_contract,
     get_contract_summary,
+    validate_contract,
+    validate_data_against_contract,
+    get_contract_violations,
 )
 from lakehouse.catalog import create_table, insert_rows
 
@@ -220,3 +223,130 @@ class TestGetContractSummary:
         create_contract("metrics", sample_contract, store_path=store)
         result = get_contract_summary(contract_table, "metrics", store_path=store)
         assert result["constraint_count"] == 2
+
+
+# --- validate_contract ---
+
+
+class TestValidateContract:
+    def test_validate_passes_compliant_table(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        result = validate_contract(contract_table, "metrics", store_path=store)
+        assert result["valid"] is True
+        assert result["violation_count"] == 0
+
+    def test_validate_no_contract(self, contract_table, store):
+        result = validate_contract(contract_table, "metrics", store_path=store)
+        assert result["valid"] is True  # No contract = skip
+
+    def test_validate_missing_column(self, contract_table, store):
+        contract = {"schema": {"missing_col": {"type": "string"}}}
+        create_contract("metrics", contract, store_path=store)
+        result = validate_contract(contract_table, "metrics", store_path=store)
+        assert result["valid"] is False
+        assert any(v["rule"] == "exists" for v in result["violations"])
+
+    def test_validate_type_mismatch(self, contract_table, store):
+        contract = {"schema": {"id": {"type": "string"}}}  # Actually long
+        create_contract("metrics", contract, store_path=store)
+        result = validate_contract(contract_table, "metrics", store_path=store)
+        assert result["valid"] is False
+        assert any(v["rule"] == "type" for v in result["violations"])
+
+    def test_validate_range_constraint(self, contract_table, store):
+        contract = {"constraints": [{"column": "value", "rule": "range", "min": 0, "max": 15}]}
+        create_contract("metrics", contract, store_path=store)
+        result = validate_contract(contract_table, "metrics", store_path=store)
+        # value=20.0 exceeds max=15
+        assert result["valid"] is False
+        assert any(v["rule"] == "range" for v in result["violations"])
+
+    def test_validate_not_null_constraint(self, test_catalog, store):
+        create_table(test_catalog, "nullable_tbl", columns={"id": "long", "name": "string"})
+        insert_rows(test_catalog, "default.nullable_tbl", [
+            {"id": 1, "name": None},
+        ])
+        contract = {"constraints": [{"column": "name", "rule": "not_null"}]}
+        create_contract("nullable_tbl", contract, store_path=store)
+        result = validate_contract(test_catalog, "nullable_tbl", store_path=store)
+        assert result["valid"] is False
+        assert any(v["rule"] == "not_null" for v in result["violations"])
+
+
+# --- validate_data_against_contract ---
+
+
+class TestValidateDataAgainstContract:
+    def test_compliant_rows(self, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        rows = [{"id": 1, "name": "alice", "value": 10.0}]
+        result = validate_data_against_contract("metrics", rows, store_path=store)
+        assert result["valid"] is True
+
+    def test_missing_column(self, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        rows = [{"id": 1, "name": "alice"}]  # Missing 'value'
+        result = validate_data_against_contract("metrics", rows, store_path=store)
+        assert result["valid"] is False
+        assert any(v["rule"] == "exists" for v in result["violations"])
+
+    def test_null_in_non_nullable(self, store):
+        contract = {"schema": {"id": {"type": "long", "nullable": False}}}
+        create_contract("tbl", contract, store_path=store)
+        rows = [{"id": None}]
+        result = validate_data_against_contract("tbl", rows, store_path=store)
+        assert result["valid"] is False
+        assert any(v["rule"] == "nullable" for v in result["violations"])
+
+    def test_range_violation(self, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        rows = [{"id": 1, "name": "alice", "value": -5.0}]  # Below min=0
+        result = validate_data_against_contract("metrics", rows, store_path=store)
+        assert result["valid"] is False
+        assert any(v["rule"] == "range" for v in result["violations"])
+
+    def test_enum_violation(self, store):
+        contract = {"constraints": [{"column": "status", "rule": "enum", "values": ["active", "inactive"]}]}
+        create_contract("tbl", contract, store_path=store)
+        rows = [{"status": "unknown"}]
+        result = validate_data_against_contract("tbl", rows, store_path=store)
+        assert result["valid"] is False
+        assert any(v["rule"] == "enum" for v in result["violations"])
+
+    def test_empty_rows_pass(self, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        result = validate_data_against_contract("metrics", [], store_path=store)
+        assert result["valid"] is True
+
+    def test_no_contract_accepts_all(self, store):
+        rows = [{"anything": "goes"}]
+        result = validate_data_against_contract("no_contract", rows, store_path=store)
+        assert result["valid"] is True
+
+    def test_violation_report_includes_row_index(self, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        rows = [
+            {"id": 1, "name": "ok", "value": 10.0},
+            {"id": 2, "name": "bad", "value": 2000.0},  # Above max=1000
+        ]
+        result = validate_data_against_contract("metrics", rows, store_path=store)
+        assert result["valid"] is False
+        bad_rows = [v for v in result["violations"] if v.get("row") == 1]
+        assert len(bad_rows) > 0
+
+
+# --- get_contract_violations ---
+
+
+class TestGetContractViolations:
+    def test_violations_includes_schema_and_constraints(self, contract_table, store):
+        contract = {
+            "schema": {"missing": {"type": "string"}},
+            "constraints": [{"column": "value", "rule": "range", "min": 0, "max": 5}],
+        }
+        create_contract("metrics", contract, store_path=store)
+        result = get_contract_violations(contract_table, "metrics", store_path=store)
+        assert result["violation_count"] >= 2
+        types = {v["type"] for v in result["violations"]}
+        assert "schema" in types
+        assert "constraint" in types
