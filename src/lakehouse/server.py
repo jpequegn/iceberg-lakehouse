@@ -1733,6 +1733,50 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="create_contract",
+            description="Create a data contract for a table defining expected schema, quality thresholds, freshness requirements, and column constraints.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "contract": {"type": "object", "description": "Contract definition with schema, quality, freshness, constraints, owner, description"},
+                },
+                "required": ["table_name", "contract"],
+            },
+        ),
+        Tool(
+            name="get_contract",
+            description="Get the active data contract for a table including schema, quality, freshness, and constraint terms.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="list_contracts",
+            description="List all data contracts, optionally filtered by namespace.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string", "description": "Filter by namespace"},
+                },
+            },
+        ),
+        Tool(
+            name="get_contract_summary",
+            description="Compare contract terms against current table state: schema match, quality score, freshness, and constraint compliance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -4839,6 +4883,44 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get refresh history failed: {str(e)}")]
+
+        elif name == "create_contract":
+            try:
+                from .contracts import create_contract
+                result = create_contract(
+                    table_name=arguments["table_name"],
+                    contract=arguments["contract"],
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Create contract failed: {str(e)}")]
+
+        elif name == "get_contract":
+            try:
+                from .contracts import get_contract
+                result = get_contract(table_name=arguments["table_name"])
+                if result is None:
+                    return [TextContent(type="text", text=f"No contract found for '{arguments['table_name']}'")]
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get contract failed: {str(e)}")]
+
+        elif name == "list_contracts":
+            try:
+                from .contracts import list_contracts
+                result = list_contracts(namespace=arguments.get("namespace"))
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"List contracts failed: {str(e)}")]
+
+        elif name == "get_contract_summary":
+            try:
+                from .contracts import get_contract_summary
+                catalog = get_catalog()
+                result = get_contract_summary(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get contract summary failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
