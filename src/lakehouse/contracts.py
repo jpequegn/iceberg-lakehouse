@@ -1261,3 +1261,171 @@ def dry_run_report(
         "overall_pass": overall_pass,
         "message": f"Test report for '{table_name}': {'PASS' if overall_pass else 'FAIL'}",
     }
+
+
+def get_contract_dashboard(
+    catalog,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Comprehensive contract compliance dashboard."""
+    from .catalog import list_tables
+
+    store = _load_store(store_path)
+    all_tables = list_tables(catalog, namespace="*")
+
+    # Contract stats
+    total_contracts = len(store)
+    active = sum(1 for e in store.values() if e.get("status", "active") == "active")
+    deprecated = sum(1 for e in store.values() if e.get("status") == "deprecated")
+
+    # Coverage
+    contracted_tables = [t for t in all_tables if t in store]
+    uncovered_tables = [t for t in all_tables if t not in store]
+    coverage_pct = round(len(contracted_tables) / len(all_tables) * 100, 1) if all_tables else 0.0
+
+    # Compliance rate and scores
+    compliance_results = []
+    for table_name, entry in store.items():
+        history = entry.get("_compliance_history", [])
+        last_check = history[-1] if history else None
+        consumers = entry.get("consumers", [])
+        producer = entry.get("producer")
+
+        compliance_results.append({
+            "table": table_name,
+            "status": entry.get("status", "active"),
+            "version": entry.get("version", 1),
+            "last_check_passed": last_check["passed"] if last_check else None,
+            "last_check_at": last_check["checked_at"] if last_check else None,
+            "last_violation_count": last_check["violation_count"] if last_check else 0,
+            "consumer_count": len(consumers),
+            "producer": producer["name"] if producer else None,
+        })
+
+    tables_with_checks = [r for r in compliance_results if r["last_check_passed"] is not None]
+    passing_count = sum(1 for r in tables_with_checks if r["last_check_passed"])
+    compliance_rate = round(passing_count / len(tables_with_checks) * 100, 1) if tables_with_checks else 100.0
+
+    # Worst tables (most recent violations)
+    worst = sorted(
+        [r for r in compliance_results if r["last_violation_count"] > 0],
+        key=lambda r: r["last_violation_count"],
+        reverse=True,
+    )[:5]
+
+    # Recent violations across all tables
+    recent_violations = []
+    for table_name, entry in store.items():
+        for check in reversed(entry.get("_compliance_history", [])[-10:]):
+            if not check["passed"]:
+                recent_violations.append({
+                    "table": table_name,
+                    "checked_at": check["checked_at"],
+                    "violation_count": check["violation_count"],
+                })
+    recent_violations = sorted(recent_violations, key=lambda v: v["checked_at"], reverse=True)[:10]
+
+    return {
+        "total_contracts": total_contracts,
+        "active": active,
+        "deprecated": deprecated,
+        "total_tables": len(all_tables),
+        "coverage_pct": coverage_pct,
+        "compliance_rate": compliance_rate,
+        "tables": compliance_results,
+        "worst_tables": worst,
+        "recent_violations": recent_violations,
+        "uncovered_tables": uncovered_tables,
+        "message": f"Contract dashboard: {total_contracts} contracts, {coverage_pct}% coverage, {compliance_rate}% compliance",
+    }
+
+
+def get_violation_trends(
+    table_name: Optional[str] = None,
+    days: int = 30,
+    store_path: Optional[Path] = None,
+) -> list[dict]:
+    """Aggregate violation counts over time."""
+    store = _load_store(store_path)
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    cutoff_iso = cutoff.isoformat()
+
+    # Collect all compliance history entries
+    entries = []
+    if table_name:
+        table_name = _normalize(table_name)
+        entry = store.get(table_name)
+        if entry:
+            entries = [(table_name, entry)]
+    else:
+        entries = list(store.items())
+
+    # Group by date
+    by_date = {}
+    for tbl, entry in entries:
+        for check in entry.get("_compliance_history", []):
+            if check["checked_at"] >= cutoff_iso:
+                date_key = check["checked_at"][:10]
+                if date_key not in by_date:
+                    by_date[date_key] = {"date": date_key, "checks": 0, "violations": 0, "passed": 0, "failed": 0}
+                by_date[date_key]["checks"] += 1
+                by_date[date_key]["violations"] += check["violation_count"]
+                if check["passed"]:
+                    by_date[date_key]["passed"] += 1
+                else:
+                    by_date[date_key]["failed"] += 1
+
+    return sorted(by_date.values(), key=lambda d: d["date"])
+
+
+def get_contract_health(
+    catalog,
+    table_name: str,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Single-table health card with full contract and compliance info."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return {"table": table_name, "has_contract": False, "message": f"No contract for '{table_name}'"}
+
+    # Basic info
+    contract = {k: v for k, v in entry.items() if not k.startswith("_")}
+
+    # Compliance history
+    history = entry.get("_compliance_history", [])
+    last_check = history[-1] if history else None
+
+    # Recent checks
+    recent_checks = list(reversed(history[-5:]))
+
+    # Consumers
+    consumers = entry.get("consumers", [])
+    producer = entry.get("producer")
+
+    # Compliance score
+    try:
+        score_result = get_compliance_score(catalog, table_name, store_path=store_path)
+        score = score_result.get("score")
+    except Exception:
+        score = None
+
+    return {
+        "table": table_name,
+        "has_contract": True,
+        "contract": contract,
+        "compliance_score": score,
+        "last_check_passed": last_check["passed"] if last_check else None,
+        "last_check_at": last_check["checked_at"] if last_check else None,
+        "last_violation_count": last_check["violation_count"] if last_check else 0,
+        "recent_checks": recent_checks,
+        "consumer_count": len(consumers),
+        "consumers": [c["name"] for c in consumers],
+        "producer": producer["name"] if producer else None,
+        "status": entry.get("status", "active"),
+        "version": entry.get("version", 1),
+        "message": f"Health card for '{table_name}'",
+    }

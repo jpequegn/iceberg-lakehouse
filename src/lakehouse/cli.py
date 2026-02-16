@@ -5464,6 +5464,84 @@ def contract_dry_run_migration(table_name: str, file_path: str):
         console.print(f"[green]{result['resolved_count']} violations resolved[/green]")
 
 
+@contract.command("dashboard")
+def contract_dashboard_cmd():
+    """Show contract compliance dashboard."""
+    from .catalog import get_catalog
+    from .contracts import get_contract_dashboard
+
+    catalog = get_catalog()
+    d = get_contract_dashboard(catalog)
+
+    console.print(f"\n[bold]Contract Dashboard[/bold]")
+    console.print(f"  Contracts: {d['total_contracts']} ({d['active']} active, {d['deprecated']} deprecated)")
+    console.print(f"  Coverage: {d['coverage_pct']}% ({len(d['uncovered_tables'])} uncovered)")
+
+    compliance_color = "green" if d["compliance_rate"] >= 80 else "yellow" if d["compliance_rate"] >= 50 else "red"
+    console.print(f"  Compliance: [{compliance_color}]{d['compliance_rate']}%[/{compliance_color}]")
+
+    if d["worst_tables"]:
+        console.print("\n[bold red]Worst Tables:[/bold red]")
+        for t in d["worst_tables"]:
+            console.print(f"  - {t['table']}: {t['last_violation_count']} violations")
+
+    if d["recent_violations"]:
+        console.print("\n[bold]Recent Violations:[/bold]")
+        for v in d["recent_violations"][:5]:
+            console.print(f"  {v['checked_at'][:19]}  {v['table']}  ({v['violation_count']} violations)")
+
+
+@contract.command("health")
+@click.argument("table_name")
+def contract_health_cmd(table_name: str):
+    """Show health card for a single table."""
+    from .catalog import get_catalog
+    from .contracts import get_contract_health
+
+    catalog = get_catalog()
+    h = get_contract_health(catalog, table_name)
+
+    if not h["has_contract"]:
+        console.print(f"[yellow]{h['message']}[/yellow]")
+        return
+
+    console.print(f"\n[bold]Health: {h['table']}[/bold]")
+    console.print(f"  Status: {h['status']}  |  Version: {h['version']}")
+    if h["compliance_score"] is not None:
+        color = "green" if h["compliance_score"] >= 80 else "yellow" if h["compliance_score"] >= 50 else "red"
+        console.print(f"  Score: [{color}]{h['compliance_score']}/100[/{color}]")
+    if h["last_check_at"]:
+        status = "[green]PASS[/green]" if h["last_check_passed"] else f"[red]FAIL ({h['last_violation_count']})[/red]"
+        console.print(f"  Last check: {h['last_check_at'][:19]}  {status}")
+    if h["producer"]:
+        console.print(f"  Producer: {h['producer']}")
+    if h["consumers"]:
+        console.print(f"  Consumers: {', '.join(h['consumers'])}")
+
+
+@contract.command("trends")
+@click.argument("table_name", required=False)
+@click.option("--days", default=30, help="Number of days to look back")
+def contract_trends_cmd(table_name: str, days: int):
+    """Show violation trends."""
+    from .contracts import get_violation_trends
+
+    trends = get_violation_trends(table_name=table_name, days=days)
+    if not trends:
+        console.print("[yellow]No compliance data found.[/yellow]")
+        return
+
+    table = Table(title=f"Violation Trends (last {days} days)")
+    table.add_column("Date")
+    table.add_column("Checks")
+    table.add_column("Passed")
+    table.add_column("Failed")
+    table.add_column("Violations")
+    for t in trends:
+        table.add_row(t["date"], str(t["checks"]), str(t["passed"]), str(t["failed"]), str(t["violations"]))
+    console.print(table)
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")

@@ -1848,6 +1848,25 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_contract_dashboard",
+            description="Comprehensive contract compliance dashboard: coverage, compliance rate, worst tables, recent violations.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="get_contract_health",
+            description="Single-table contract health card: terms, compliance score, last check, violations, consumers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
             name="dry_run_contract",
             description="Test a proposed contract against existing table data without saving. Returns violations.",
             inputSchema={
@@ -5106,6 +5125,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get compliance score failed: {str(e)}")]
+
+        elif name == "get_contract_dashboard":
+            try:
+                from .contracts import get_contract_dashboard
+                catalog = get_catalog()
+                result = get_contract_dashboard(catalog)
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get contract dashboard failed: {str(e)}")]
+
+        elif name == "get_contract_health":
+            try:
+                from .contracts import get_contract_health
+                catalog = get_catalog()
+                result = get_contract_health(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get contract health failed: {str(e)}")]
 
         elif name == "dry_run_contract":
             try:
