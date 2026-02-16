@@ -26,6 +26,9 @@ from lakehouse.contracts import (
     list_producers,
     remove_consumer,
     get_contract_coverage,
+    generate_contract,
+    preview_contract,
+    apply_generated_contract,
 )
 from lakehouse.catalog import create_table, insert_rows
 
@@ -723,3 +726,86 @@ class TestContractCoverage:
         result = get_contract_coverage(test_catalog, store_path=store)
         assert result["coverage_pct"] == 0.0
         assert result["uncovered_count"] == result["total_tables"]
+
+
+# --- generate_contract / preview_contract / apply_generated_contract ---
+
+
+class TestGenerateContract:
+    def test_generate_infers_schema(self, contract_table, store):
+        result = generate_contract(contract_table, "metrics", store_path=store)
+        contract = result["contract"]
+        assert "id" in contract["schema"]
+        assert contract["schema"]["id"]["type"] == "long"
+        assert "name" in contract["schema"]
+        assert "value" in contract["schema"]
+
+    def test_generate_saves_contract(self, contract_table, store):
+        generate_contract(contract_table, "metrics", store_path=store)
+        result = get_contract("metrics", store_path=store)
+        assert result is not None
+        assert result["version"] == 1
+
+    def test_generate_infers_not_null(self, contract_table, store):
+        result = generate_contract(contract_table, "metrics", store_path=store)
+        constraints = result["contract"]["constraints"]
+        not_null_cols = [c["column"] for c in constraints if c["rule"] == "not_null"]
+        # All columns in contract_table have non-null values
+        assert "id" in not_null_cols
+
+    def test_generate_infers_range(self, contract_table, store):
+        result = generate_contract(contract_table, "metrics", store_path=store)
+        constraints = result["contract"]["constraints"]
+        range_constraints = [c for c in constraints if c["rule"] == "range"]
+        assert len(range_constraints) > 0  # id and value are numeric
+
+    def test_generate_infers_enum(self, test_catalog, store):
+        create_table(test_catalog, "status_tbl", columns={"status": "string", "id": "long"})
+        insert_rows(test_catalog, "default.status_tbl", [
+            {"status": "active", "id": 1},
+            {"status": "inactive", "id": 2},
+            {"status": "active", "id": 3},
+        ])
+        result = generate_contract(test_catalog, "status_tbl", store_path=store)
+        constraints = result["contract"]["constraints"]
+        enum_constraints = [c for c in constraints if c["rule"] == "enum"]
+        assert len(enum_constraints) == 1
+        assert set(enum_constraints[0]["values"]) == {"active", "inactive"}
+
+    def test_strict_mode_tighter(self, contract_table, store):
+        contract = preview_contract(contract_table, "metrics", strict=True)
+        # Strict should have range constraints with exact min/max
+        range_constraints = [c for c in contract["constraints"] if c["rule"] == "range" and c["column"] == "value"]
+        if range_constraints:
+            rc = range_constraints[0]
+            assert rc["min"] == 10.0  # Exact data min
+            assert rc["max"] == 20.0  # Exact data max
+
+
+class TestPreviewContract:
+    def test_preview_does_not_save(self, contract_table, store):
+        preview_contract(contract_table, "metrics")
+        result = get_contract("metrics", store_path=store)
+        assert result is None
+
+    def test_preview_returns_contract(self, contract_table, store):
+        contract = preview_contract(contract_table, "metrics")
+        assert "schema" in contract
+        assert "constraints" in contract
+        assert "description" in contract
+
+
+class TestApplyGeneratedContract:
+    def test_apply_creates_new(self, contract_table, store):
+        contract = preview_contract(contract_table, "metrics")
+        result = apply_generated_contract(contract_table, "metrics", contract, store_path=store)
+        assert "Created" in result["message"] or "version" in result
+        saved = get_contract("metrics", store_path=store)
+        assert saved is not None
+
+    def test_apply_updates_existing(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        contract = preview_contract(contract_table, "metrics")
+        result = apply_generated_contract(contract_table, "metrics", contract, store_path=store)
+        saved = get_contract("metrics", store_path=store)
+        assert saved["version"] == 2

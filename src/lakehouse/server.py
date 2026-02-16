@@ -1824,6 +1824,30 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="generate_contract",
+            description="Auto-generate a contract from a table's schema, data profile, and quality score.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "strict": {"type": "boolean", "description": "Use tighter thresholds (default false)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="preview_contract",
+            description="Preview a generated contract without saving it. Returns the contract for review.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "strict": {"type": "boolean", "description": "Use tighter thresholds (default false)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
             name="add_contract_consumer",
             description="Register a consumer of a table's data contract.",
             inputSchema={
@@ -5058,6 +5082,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get compliance score failed: {str(e)}")]
+
+        elif name == "generate_contract":
+            try:
+                from .contracts import generate_contract
+                catalog = get_catalog()
+                result = generate_contract(catalog, arguments["table_name"], strict=arguments.get("strict", False))
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Generate contract failed: {str(e)}")]
+
+        elif name == "preview_contract":
+            try:
+                from .contracts import preview_contract
+                catalog = get_catalog()
+                result = preview_contract(catalog, arguments["table_name"], strict=arguments.get("strict", False))
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Preview contract failed: {str(e)}")]
 
         elif name == "add_contract_consumer":
             try:
