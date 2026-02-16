@@ -32,6 +32,9 @@ from lakehouse.contracts import (
     dry_run_contract,
     dry_run_migration,
     dry_run_report,
+    get_contract_dashboard,
+    get_violation_trends,
+    get_contract_health,
 )
 from lakehouse.catalog import create_table, insert_rows
 
@@ -914,3 +917,91 @@ class TestDryRunReport:
         report = dry_run_report(contract_table, "metrics", {})
         assert report["schema_compatible"] is True
         assert report["overall_pass"] is True
+
+
+# --- get_contract_dashboard ---
+
+
+class TestGetContractDashboard:
+    def test_dashboard_with_contracts(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        dashboard = get_contract_dashboard(contract_table, store_path=store)
+        assert dashboard["total_contracts"] >= 1
+        assert dashboard["active"] >= 1
+        assert dashboard["coverage_pct"] > 0
+
+    def test_dashboard_no_contracts(self, test_catalog, store):
+        dashboard = get_contract_dashboard(test_catalog, store_path=store)
+        assert dashboard["total_contracts"] == 0
+        assert dashboard["coverage_pct"] == 0.0
+        assert dashboard["compliance_rate"] == 100.0  # No contracts = vacuously compliant
+
+    def test_dashboard_compliance_rate(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)  # Should pass
+        dashboard = get_contract_dashboard(contract_table, store_path=store)
+        assert dashboard["compliance_rate"] == 100.0
+
+    def test_dashboard_worst_tables(self, contract_table, store):
+        # Create a contract with violations
+        contract = {"schema": {"missing_col": {"type": "string"}}}
+        create_contract("metrics", contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        dashboard = get_contract_dashboard(contract_table, store_path=store)
+        assert len(dashboard["worst_tables"]) > 0
+
+    def test_dashboard_recent_violations(self, contract_table, store):
+        contract = {"schema": {"missing_col": {"type": "string"}}}
+        create_contract("metrics", contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        dashboard = get_contract_dashboard(contract_table, store_path=store)
+        assert len(dashboard["recent_violations"]) > 0
+
+
+# --- get_violation_trends ---
+
+
+class TestGetViolationTrends:
+    def test_trends_with_history(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        trends = get_violation_trends(store_path=store)
+        assert len(trends) > 0
+        assert trends[0]["checks"] >= 1
+
+    def test_trends_empty(self, store):
+        trends = get_violation_trends(store_path=store)
+        assert trends == []
+
+    def test_trends_by_table(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        trends = get_violation_trends(table_name="metrics", store_path=store)
+        assert len(trends) > 0
+
+
+# --- get_contract_health ---
+
+
+class TestGetContractHealth:
+    def test_health_with_contract(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        add_consumer("metrics", "analytics", store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        health = get_contract_health(contract_table, "metrics", store_path=store)
+        assert health["has_contract"] is True
+        assert health["compliance_score"] is not None
+        assert health["consumer_count"] == 1
+        assert "analytics" in health["consumers"]
+        assert health["last_check_passed"] is True
+
+    def test_health_no_contract(self, contract_table, store):
+        health = get_contract_health(contract_table, "metrics", store_path=store)
+        assert health["has_contract"] is False
+
+    def test_health_includes_version(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        health = get_contract_health(contract_table, "metrics", store_path=store)
+        assert health["version"] == 1
+        assert health["status"] == "active"
