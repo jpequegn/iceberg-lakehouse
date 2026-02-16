@@ -839,3 +839,146 @@ def get_compliance_score(
         "freshness_ratio": round(freshness_ratio, 3),
         "message": f"Compliance score for '{table_name}': {score}/100",
     }
+
+
+def add_consumer(
+    table_name: str,
+    consumer_name: str,
+    contact: Optional[str] = None,
+    usage: Optional[str] = None,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Register a consumer of a table's contract."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+
+    if table_name not in store:
+        raise ValueError(f"No contract found for '{table_name}'")
+
+    entry = store[table_name]
+    consumers = entry.setdefault("consumers", [])
+
+    # Check for duplicates
+    if any(c["name"] == consumer_name for c in consumers):
+        return {"table": table_name, "message": f"Consumer '{consumer_name}' already registered"}
+
+    consumer = {"name": consumer_name, "added_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    if contact:
+        consumer["contact"] = contact
+    if usage:
+        consumer["usage"] = usage
+    consumers.append(consumer)
+
+    _save_store(store, store_path)
+    return {"table": table_name, "consumer": consumer_name, "message": f"Consumer '{consumer_name}' registered for '{table_name}'"}
+
+
+def add_producer(
+    table_name: str,
+    producer_name: str,
+    contact: Optional[str] = None,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Register the producer (data owner) for a table."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+
+    if table_name not in store:
+        raise ValueError(f"No contract found for '{table_name}'")
+
+    entry = store[table_name]
+    producer = {"name": producer_name, "added_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    if contact:
+        producer["contact"] = contact
+    entry["producer"] = producer
+
+    _save_store(store, store_path)
+    return {"table": table_name, "producer": producer_name, "message": f"Producer '{producer_name}' set for '{table_name}'"}
+
+
+def list_consumers(
+    table_name: str,
+    store_path: Optional[Path] = None,
+) -> list[dict]:
+    """List all registered consumers for a table."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return []
+
+    return entry.get("consumers", [])
+
+
+def list_producers(
+    table_name: str,
+    store_path: Optional[Path] = None,
+) -> list[dict]:
+    """List the producer(s) for a table."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return []
+
+    producer = entry.get("producer")
+    return [producer] if producer else []
+
+
+def remove_consumer(
+    table_name: str,
+    consumer_name: str,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Remove a consumer from a table's contract."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+
+    if table_name not in store:
+        return {"table": table_name, "message": f"No contract found for '{table_name}'"}
+
+    entry = store[table_name]
+    consumers = entry.get("consumers", [])
+    original_count = len(consumers)
+    entry["consumers"] = [c for c in consumers if c["name"] != consumer_name]
+
+    if len(entry["consumers"]) == original_count:
+        return {"table": table_name, "message": f"Consumer '{consumer_name}' not found"}
+
+    _save_store(store, store_path)
+    return {"table": table_name, "message": f"Consumer '{consumer_name}' removed from '{table_name}'"}
+
+
+def get_contract_coverage(
+    catalog,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Scan all tables and report contract coverage."""
+    from .catalog import list_tables
+
+    all_tables = list_tables(catalog, namespace="*")
+    store = _load_store(store_path)
+
+    contracted = []
+    uncovered = []
+
+    for t in all_tables:
+        if t in store:
+            contracted.append(t)
+        else:
+            uncovered.append(t)
+
+    total = len(all_tables)
+    coverage_pct = round((len(contracted) / total * 100), 1) if total > 0 else 0.0
+
+    return {
+        "total_tables": total,
+        "contracted": len(contracted),
+        "uncovered_count": len(uncovered),
+        "coverage_pct": coverage_pct,
+        "contracted_tables": contracted,
+        "uncovered_tables": uncovered,
+        "message": f"Contract coverage: {len(contracted)}/{total} tables ({coverage_pct}%)",
+    }

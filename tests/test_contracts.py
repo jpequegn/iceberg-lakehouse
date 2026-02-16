@@ -20,6 +20,12 @@ from lakehouse.contracts import (
     monitor_contract,
     get_compliance_history,
     get_compliance_score,
+    add_consumer,
+    add_producer,
+    list_consumers,
+    list_producers,
+    remove_consumer,
+    get_contract_coverage,
 )
 from lakehouse.catalog import create_table, insert_rows
 
@@ -608,3 +614,112 @@ class TestGetComplianceScore:
     def test_score_no_contract(self, contract_table, store):
         result = get_compliance_score(contract_table, "metrics", store_path=store)
         assert result["score"] is None
+
+
+# --- add_consumer / list_consumers / remove_consumer ---
+
+
+class TestConsumers:
+    def test_add_and_list_consumer(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_consumer("tbl", "analytics-team", store_path=store)
+        consumers = list_consumers("tbl", store_path=store)
+        assert len(consumers) == 1
+        assert consumers[0]["name"] == "analytics-team"
+
+    def test_add_consumer_with_contact(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_consumer("tbl", "ml-team", contact="ml@example.com", usage="model training", store_path=store)
+        consumers = list_consumers("tbl", store_path=store)
+        assert consumers[0]["contact"] == "ml@example.com"
+        assert consumers[0]["usage"] == "model training"
+
+    def test_multiple_consumers(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_consumer("tbl", "team-a", store_path=store)
+        add_consumer("tbl", "team-b", store_path=store)
+        consumers = list_consumers("tbl", store_path=store)
+        assert len(consumers) == 2
+
+    def test_duplicate_consumer(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_consumer("tbl", "team-a", store_path=store)
+        result = add_consumer("tbl", "team-a", store_path=store)
+        assert "already registered" in result["message"]
+        assert len(list_consumers("tbl", store_path=store)) == 1
+
+    def test_remove_consumer(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_consumer("tbl", "team-a", store_path=store)
+        remove_consumer("tbl", "team-a", store_path=store)
+        assert list_consumers("tbl", store_path=store) == []
+
+    def test_remove_nonexistent_consumer(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        result = remove_consumer("tbl", "ghost", store_path=store)
+        assert "not found" in result["message"]
+
+    def test_no_contract_returns_empty(self, store):
+        assert list_consumers("nonexistent", store_path=store) == []
+
+    def test_add_consumer_no_contract_raises(self, store):
+        with pytest.raises(ValueError, match="No contract found"):
+            add_consumer("nonexistent", "team", store_path=store)
+
+
+# --- add_producer / list_producers ---
+
+
+class TestProducers:
+    def test_add_and_list_producer(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_producer("tbl", "ingestion-pipeline", store_path=store)
+        producers = list_producers("tbl", store_path=store)
+        assert len(producers) == 1
+        assert producers[0]["name"] == "ingestion-pipeline"
+
+    def test_producer_with_contact(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_producer("tbl", "etl", contact="data-eng@example.com", store_path=store)
+        producers = list_producers("tbl", store_path=store)
+        assert producers[0]["contact"] == "data-eng@example.com"
+
+    def test_replace_producer(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        add_producer("tbl", "old-pipeline", store_path=store)
+        add_producer("tbl", "new-pipeline", store_path=store)
+        producers = list_producers("tbl", store_path=store)
+        assert len(producers) == 1
+        assert producers[0]["name"] == "new-pipeline"
+
+    def test_no_contract_returns_empty(self, store):
+        assert list_producers("nonexistent", store_path=store) == []
+
+
+# --- get_contract_coverage ---
+
+
+class TestContractCoverage:
+    def test_coverage_with_mix(self, test_catalog, store, sample_contract):
+        from lakehouse.catalog import list_tables
+        all_tables = list_tables(test_catalog, namespace="*")
+        # Contract one table, leave rest uncovered
+        create_contract(all_tables[0], sample_contract, store_path=store)
+        result = get_contract_coverage(test_catalog, store_path=store)
+        assert result["total_tables"] == len(all_tables)
+        assert result["contracted"] == 1
+        assert result["uncovered_count"] == len(all_tables) - 1
+        assert 0 < result["coverage_pct"] < 100
+
+    def test_coverage_all_contracted(self, test_catalog, store, sample_contract):
+        from lakehouse.catalog import list_tables
+        all_tables = list_tables(test_catalog, namespace="*")
+        for t in all_tables:
+            create_contract(t, sample_contract, store_path=store)
+        result = get_contract_coverage(test_catalog, store_path=store)
+        assert result["coverage_pct"] == 100.0
+
+    def test_coverage_none_contracted(self, test_catalog, store):
+        result = get_contract_coverage(test_catalog, store_path=store)
+        assert result["coverage_pct"] == 0.0
+        assert result["uncovered_count"] == result["total_tables"]
