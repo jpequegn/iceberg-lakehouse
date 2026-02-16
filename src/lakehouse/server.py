@@ -1848,6 +1848,30 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="dry_run_contract",
+            description="Test a proposed contract against existing table data without saving. Returns violations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "contract": {"type": "object", "description": "Proposed contract to test"},
+                },
+                "required": ["table_name", "contract"],
+            },
+        ),
+        Tool(
+            name="dry_run_migration",
+            description="Simulate migrating from current contract to a new one. Shows introduced and resolved violations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "to_contract": {"type": "object", "description": "New contract to migrate to"},
+                },
+                "required": ["table_name", "to_contract"],
+            },
+        ),
+        Tool(
             name="add_contract_consumer",
             description="Register a consumer of a table's data contract.",
             inputSchema={
@@ -5082,6 +5106,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get compliance score failed: {str(e)}")]
+
+        elif name == "dry_run_contract":
+            try:
+                from .contracts import dry_run_contract
+                catalog = get_catalog()
+                result = dry_run_contract(catalog, arguments["table_name"], arguments["contract"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Dry run contract failed: {str(e)}")]
+
+        elif name == "dry_run_migration":
+            try:
+                from .contracts import dry_run_migration
+                catalog = get_catalog()
+                result = dry_run_migration(catalog, arguments["table_name"], arguments["to_contract"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Dry run migration failed: {str(e)}")]
 
         elif name == "generate_contract":
             try:

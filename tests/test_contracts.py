@@ -29,6 +29,9 @@ from lakehouse.contracts import (
     generate_contract,
     preview_contract,
     apply_generated_contract,
+    dry_run_contract,
+    dry_run_migration,
+    dry_run_report,
 )
 from lakehouse.catalog import create_table, insert_rows
 
@@ -809,3 +812,105 @@ class TestApplyGeneratedContract:
         result = apply_generated_contract(contract_table, "metrics", contract, store_path=store)
         saved = get_contract("metrics", store_path=store)
         assert saved["version"] == 2
+
+
+# --- dry_run_contract ---
+
+
+class TestDryRunContract:
+    def test_passes_on_compliant_data(self, contract_table):
+        contract = {
+            "schema": {"id": {"type": "long"}, "name": {"type": "string"}, "value": {"type": "double"}},
+            "constraints": [{"column": "value", "rule": "range", "min": 0, "max": 100}],
+        }
+        result = dry_run_contract(contract_table, "metrics", contract)
+        assert result["valid"] is True
+        assert result["violation_count"] == 0
+
+    def test_fails_on_non_compliant(self, contract_table):
+        contract = {"schema": {"missing_col": {"type": "string"}}}
+        result = dry_run_contract(contract_table, "metrics", contract)
+        assert result["valid"] is False
+        assert any(v["rule"] == "exists" for v in result["violations"])
+
+    def test_does_not_persist(self, contract_table, store):
+        contract = {"schema": {"id": {"type": "long"}}}
+        dry_run_contract(contract_table, "metrics", contract)
+        assert get_contract("metrics", store_path=store) is None
+
+    def test_constraint_violation(self, contract_table):
+        contract = {"constraints": [{"column": "value", "rule": "range", "min": 0, "max": 15}]}
+        result = dry_run_contract(contract_table, "metrics", contract)
+        assert result["valid"] is False
+
+
+# --- dry_run_migration ---
+
+
+class TestDryRunMigration:
+    def test_migration_introduces_violations(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        # New contract with tighter range
+        new_contract = {"schema": sample_contract["schema"], "constraints": [{"column": "value", "rule": "range", "min": 0, "max": 15}]}
+        result = dry_run_migration(contract_table, "metrics", new_contract, store_path=store)
+        assert result["introduced_count"] > 0
+        assert result["safe_to_migrate"] is False
+
+    def test_migration_resolves_violations(self, contract_table, store):
+        # Current contract with missing column
+        tight = {"schema": {"missing": {"type": "string"}}}
+        create_contract("metrics", tight, store_path=store)
+        # New contract that matches actual schema
+        relaxed = {"schema": {"id": {"type": "long"}}}
+        result = dry_run_migration(contract_table, "metrics", relaxed, store_path=store)
+        assert result["resolved_count"] > 0
+
+    def test_safe_migration(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        # Same contract = no new violations
+        result = dry_run_migration(contract_table, "metrics", sample_contract, store_path=store)
+        assert result["safe_to_migrate"] is True
+
+    def test_no_current_contract(self, contract_table, store):
+        new_contract = {"schema": {"id": {"type": "long"}}}
+        result = dry_run_migration(contract_table, "metrics", new_contract, store_path=store)
+        assert result["current_violations"] == 0
+
+
+# --- dry_run_report ---
+
+
+class TestDryRunReport:
+    def test_report_all_pass(self, contract_table):
+        contract = {
+            "schema": {"id": {"type": "long"}, "name": {"type": "string"}},
+            "constraints": [{"column": "id", "rule": "not_null"}],
+        }
+        report = dry_run_report(contract_table, "metrics", contract)
+        assert report["schema_compatible"] is True
+        assert report["overall_pass"] is True
+        assert report["constraint_results"][0]["pass_rate"] == 100.0
+
+    def test_report_with_violations(self, contract_table):
+        contract = {
+            "schema": {"missing": {"type": "string"}},
+            "constraints": [{"column": "value", "rule": "range", "min": 0, "max": 5}],
+        }
+        report = dry_run_report(contract_table, "metrics", contract)
+        assert report["schema_compatible"] is False
+        assert report["overall_pass"] is False
+        # value=20 > 5, so violations > 0
+        range_results = [r for r in report["constraint_results"] if r["rule"] == "range"]
+        assert range_results[0]["violations"] > 0
+        assert range_results[0]["pass_rate"] < 100.0
+
+    def test_report_per_column_pass_rate(self, contract_table):
+        contract = {"constraints": [{"column": "value", "rule": "range", "min": 0, "max": 15}]}
+        report = dry_run_report(contract_table, "metrics", contract)
+        # value=10 passes, value=20 fails → 50% pass rate
+        assert report["constraint_results"][0]["pass_rate"] == 50.0
+
+    def test_report_empty_contract(self, contract_table):
+        report = dry_run_report(contract_table, "metrics", {})
+        assert report["schema_compatible"] is True
+        assert report["overall_pass"] is True

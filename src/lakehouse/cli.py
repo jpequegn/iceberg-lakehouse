@@ -5421,6 +5421,49 @@ def contract_apply(table_name: str, file_path: str):
     console.print(f"[green]{result['message']}[/green]")
 
 
+@contract.command("dry-run")
+@click.argument("table_name")
+@click.option("--file", "file_path", required=True, help="Path to contract JSON file")
+def contract_dry_run(table_name: str, file_path: str):
+    """Test a contract against live data without saving."""
+    from .catalog import get_catalog
+    from .contracts import dry_run_contract
+
+    catalog = get_catalog()
+    contract = json.loads(Path(file_path).read_text())
+    result = dry_run_contract(catalog, table_name, contract)
+
+    if result["valid"]:
+        console.print(f"[green]{result['message']}[/green]")
+    else:
+        console.print(f"[red]{result['message']}[/red]")
+        for v in result["violations"]:
+            console.print(f"  - {v['message']}")
+
+
+@contract.command("dry-run-migration")
+@click.argument("table_name")
+@click.option("--file", "file_path", required=True, help="Path to new contract JSON file")
+def contract_dry_run_migration(table_name: str, file_path: str):
+    """Simulate migration to a new contract."""
+    from .catalog import get_catalog
+    from .contracts import dry_run_migration
+
+    catalog = get_catalog()
+    new_contract = json.loads(Path(file_path).read_text())
+    result = dry_run_migration(catalog, table_name, new_contract)
+
+    console.print(f"[bold]{result['message']}[/bold]")
+    if result["safe_to_migrate"]:
+        console.print("[green]Safe to migrate[/green]")
+    else:
+        console.print(f"[red]{result['introduced_count']} new violations introduced[/red]")
+        for v in result["introduced"]:
+            console.print(f"  - {v['message']}")
+    if result["resolved"]:
+        console.print(f"[green]{result['resolved_count']} violations resolved[/green]")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
