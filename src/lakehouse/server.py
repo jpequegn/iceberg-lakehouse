@@ -1777,6 +1777,31 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_contract_history",
+            description="Get version history of a data contract showing what changed across versions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "limit": {"type": "integer", "description": "Max versions to return (default 20)"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="diff_contract_versions",
+            description="Diff two contract versions showing added/removed/changed fields and schema columns.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "v1": {"type": "integer", "description": "First version number"},
+                    "v2": {"type": "integer", "description": "Second version number"},
+                },
+                "required": ["table_name", "v1", "v2"],
+            },
+        ),
+        Tool(
             name="validate_contract",
             description="Validate current table state against its data contract. Checks schema conformance and constraint compliance.",
             inputSchema={
@@ -4955,6 +4980,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get contract summary failed: {str(e)}")]
+
+        elif name == "get_contract_history":
+            try:
+                from .contracts import get_contract_history
+                result = get_contract_history(arguments["table_name"], limit=arguments.get("limit", 20))
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get contract history failed: {str(e)}")]
+
+        elif name == "diff_contract_versions":
+            try:
+                from .contracts import diff_contract_versions
+                result = diff_contract_versions(arguments["table_name"], arguments["v1"], arguments["v2"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Diff contract versions failed: {str(e)}")]
 
         elif name == "validate_contract":
             try:

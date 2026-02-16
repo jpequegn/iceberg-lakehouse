@@ -5193,6 +5193,88 @@ def contract_violations(table_name: str):
         console.print(table)
 
 
+@contract.command("history")
+@click.argument("table_name")
+@click.option("--limit", "-n", default=20, help="Max versions to show")
+def contract_history(table_name: str, limit: int):
+    """Show contract version history."""
+    from .contracts import get_contract_history
+
+    history = get_contract_history(table_name, limit=limit)
+    if not history:
+        console.print("[yellow]No version history found.[/yellow]")
+        return
+
+    table = Table(title=f"Contract History ({len(history)} versions)")
+    table.add_column("Version")
+    table.add_column("Owner")
+    table.add_column("Description")
+    table.add_column("Snapshot At")
+    for h in history:
+        table.add_row(
+            str(h.get("version", "")),
+            h.get("owner", ""),
+            h.get("description", "")[:40],
+            h.get("snapshot_at", "")[:19],
+        )
+    console.print(table)
+
+
+@contract.command("diff")
+@click.argument("table_name")
+@click.option("--v1", required=True, type=int, help="First version")
+@click.option("--v2", required=True, type=int, help="Second version")
+def contract_diff(table_name: str, v1: int, v2: int):
+    """Diff two contract versions."""
+    from .contracts import diff_contract_versions
+
+    diff = diff_contract_versions(table_name, v1, v2)
+    if "error" in diff:
+        console.print(f"[red]{diff['error']}[/red]")
+        return
+
+    console.print(f"[bold]{diff['message']}[/bold]")
+    for c in diff["changes"]:
+        console.print(f"  [yellow]{c['field']}[/yellow]: {c['from']} → {c['to']}")
+    if diff["schema_added"]:
+        console.print(f"  [green]Columns added:[/green] {', '.join(diff['schema_added'])}")
+    if diff["schema_removed"]:
+        console.print(f"  [red]Columns removed:[/red] {', '.join(diff['schema_removed'])}")
+    if diff["schema_changed"]:
+        for sc in diff["schema_changed"]:
+            console.print(f"  [yellow]Column '{sc['column']}':[/yellow] {sc['from']} → {sc['to']}")
+
+
+@contract.command("deprecate")
+@click.argument("table_name")
+@click.option("--reason", required=True, help="Deprecation reason")
+@click.option("--sunset", default=None, help="Sunset date (YYYY-MM-DD)")
+def contract_deprecate(table_name: str, reason: str, sunset: str):
+    """Deprecate a contract."""
+    from .contracts import deprecate_contract
+
+    result = deprecate_contract(table_name, reason, sunset_date=sunset)
+    console.print(f"[yellow]{result['message']}[/yellow]")
+
+
+@contract.command("status")
+@click.argument("table_name")
+def contract_status(table_name: str):
+    """Show lifecycle status of a contract."""
+    from .contracts import get_contract_status
+
+    result = get_contract_status(table_name)
+    status_color = {"active": "green", "deprecated": "yellow", "not_found": "red"}.get(result["status"], "white")
+    console.print(f"  Table: {result['table']}")
+    console.print(f"  Status: [{status_color}]{result['status']}[/{status_color}]")
+    if result.get("version"):
+        console.print(f"  Version: {result['version']}")
+    if result.get("deprecation_reason"):
+        console.print(f"  Reason: {result['deprecation_reason']}")
+    if result.get("sunset_date"):
+        console.print(f"  Sunset: {result['sunset_date']}")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
