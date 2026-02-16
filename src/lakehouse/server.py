@@ -1824,6 +1824,28 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="add_contract_consumer",
+            description="Register a consumer of a table's data contract.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "consumer_name": {"type": "string", "description": "Consumer name (team or service)"},
+                    "contact": {"type": "string", "description": "Contact email"},
+                    "usage": {"type": "string", "description": "How the data is used"},
+                },
+                "required": ["table_name", "consumer_name"],
+            },
+        ),
+        Tool(
+            name="get_contract_coverage",
+            description="Report which tables have contracts and which don't, with coverage percentage.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
             name="validate_contract",
             description="Validate current table state against its data contract. Checks schema conformance and constraint compliance.",
             inputSchema={
@@ -5036,6 +5058,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get compliance score failed: {str(e)}")]
+
+        elif name == "add_contract_consumer":
+            try:
+                from .contracts import add_consumer
+                result = add_consumer(
+                    arguments["table_name"], arguments["consumer_name"],
+                    contact=arguments.get("contact"), usage=arguments.get("usage"),
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Add contract consumer failed: {str(e)}")]
+
+        elif name == "get_contract_coverage":
+            try:
+                from .contracts import get_contract_coverage
+                catalog = get_catalog()
+                result = get_contract_coverage(catalog)
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get contract coverage failed: {str(e)}")]
 
         elif name == "validate_contract":
             try:

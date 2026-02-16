@@ -5324,6 +5324,70 @@ def contract_compliance(table_name: str):
             console.print(f"  {h['checked_at'][:19]}  {status}")
 
 
+@contract.command("add-consumer")
+@click.argument("table_name")
+@click.argument("consumer")
+@click.option("--contact", default=None, help="Consumer contact email")
+@click.option("--usage", default=None, help="How the consumer uses the data")
+def contract_add_consumer(table_name: str, consumer: str, contact: str, usage: str):
+    """Register a consumer of a table's contract."""
+    from .contracts import add_consumer
+
+    result = add_consumer(table_name, consumer, contact=contact, usage=usage)
+    console.print(result["message"])
+
+
+@contract.command("add-producer")
+@click.argument("table_name")
+@click.argument("producer")
+@click.option("--contact", default=None, help="Producer contact email")
+def contract_add_producer(table_name: str, producer: str, contact: str):
+    """Register the producer for a table."""
+    from .contracts import add_producer
+
+    result = add_producer(table_name, producer, contact=contact)
+    console.print(result["message"])
+
+
+@contract.command("consumers")
+@click.argument("table_name")
+def contract_consumers(table_name: str):
+    """List consumers of a table."""
+    from .contracts import list_consumers
+
+    consumers = list_consumers(table_name)
+    if not consumers:
+        console.print("[yellow]No consumers registered.[/yellow]")
+        return
+
+    table = Table(title="Consumers")
+    table.add_column("Name")
+    table.add_column("Contact")
+    table.add_column("Usage")
+    table.add_column("Added")
+    for c in consumers:
+        table.add_row(c["name"], c.get("contact", ""), c.get("usage", ""), c.get("added_at", "")[:19])
+    console.print(table)
+
+
+@contract.command("coverage")
+def contract_coverage():
+    """Show contract coverage across all tables."""
+    from .catalog import get_catalog
+    from .contracts import get_contract_coverage
+
+    catalog = get_catalog()
+    result = get_contract_coverage(catalog)
+
+    color = "green" if result["coverage_pct"] >= 80 else "yellow" if result["coverage_pct"] >= 50 else "red"
+    console.print(f"[bold]{result['message']}[/bold]")
+    console.print(f"  [{color}]{result['coverage_pct']}%[/{color}] coverage ({result['contracted']}/{result['total_tables']} tables)")
+    if result["uncovered_tables"]:
+        console.print("\n[yellow]Uncovered tables:[/yellow]")
+        for t in result["uncovered_tables"]:
+            console.print(f"  - {t}")
+
+
 @main.command()
 @click.option("--rows", default="100,1000,10000", help="Comma-separated row counts to benchmark")
 @click.option("--output", "-o", default=None, help="Output markdown file (default: print to stdout)")
