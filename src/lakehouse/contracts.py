@@ -270,3 +270,234 @@ def get_contract_summary(
         "owner": entry.get("owner", ""),
         "message": f"Contract summary for '{table_name}': schema {'OK' if schema_match else 'DRIFT'}, {len(schema_issues)} issues",
     }
+
+
+def validate_contract(
+    catalog,
+    table_name: str,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Validate current table state against its contract."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return {"table": table_name, "valid": True, "violations": [], "message": f"No contract for '{table_name}' — skipping"}
+
+    violations = []
+
+    # Schema validation
+    table = catalog.load_table(table_name)
+    actual_schema = {}
+    for field in table.schema().fields:
+        type_name = type(field.field_type).__name__
+        actual_schema[field.name] = {
+            "type": TYPE_MAP.get(type_name, "string"),
+            "nullable": not field.required,
+        }
+
+    contract_schema = entry.get("schema", {})
+    for col_name, col_def in contract_schema.items():
+        if col_name not in actual_schema:
+            violations.append({"type": "schema", "field": col_name, "rule": "exists", "message": f"Missing column: {col_name}"})
+        else:
+            actual = actual_schema[col_name]
+            if col_def.get("type") and actual["type"] != col_def["type"]:
+                violations.append({
+                    "type": "schema", "field": col_name, "rule": "type",
+                    "expected": col_def["type"], "actual": actual["type"],
+                    "message": f"Type mismatch on '{col_name}': expected {col_def['type']}, got {actual['type']}",
+                })
+
+    # Constraint validation on actual data
+    arrow = table.scan().to_arrow()
+    if arrow.num_rows > 0:
+        import duckdb
+        conn = duckdb.connect()
+        conn.register("tbl", arrow)
+
+        for constraint in entry.get("constraints", []):
+            col = constraint.get("column", "")
+            rule = constraint.get("rule", "")
+            try:
+                cv = _validate_constraint(conn, col, rule, constraint)
+                if cv:
+                    violations.append(cv)
+            except Exception:
+                pass
+
+        conn.close()
+
+    valid = len(violations) == 0
+    return {
+        "table": table_name,
+        "valid": valid,
+        "violations": violations,
+        "violation_count": len(violations),
+        "message": f"Contract validation for '{table_name}': {'PASS' if valid else f'FAIL ({len(violations)} violations)'}",
+    }
+
+
+def validate_data_against_contract(
+    table_name: str,
+    rows: list[dict],
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Validate a batch of rows against the contract before writing."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return {"table": table_name, "valid": True, "violations": [], "message": "No contract — all rows accepted"}
+
+    violations = []
+    contract_schema = entry.get("schema", {})
+    constraints = entry.get("constraints", [])
+
+    for i, row in enumerate(rows):
+        # Schema checks
+        for col_name, col_def in contract_schema.items():
+            if col_name not in row:
+                violations.append({
+                    "type": "schema", "field": col_name, "rule": "exists",
+                    "row": i, "message": f"Row {i}: missing column '{col_name}'",
+                })
+            elif row[col_name] is None and col_def.get("nullable") is False:
+                violations.append({
+                    "type": "schema", "field": col_name, "rule": "nullable",
+                    "row": i, "message": f"Row {i}: null value in non-nullable '{col_name}'",
+                })
+
+        # Constraint checks
+        for constraint in constraints:
+            col = constraint.get("column", "")
+            rule = constraint.get("rule", "")
+            value = row.get(col)
+
+            if rule == "not_null" and value is None:
+                violations.append({
+                    "type": "constraint", "field": col, "rule": rule,
+                    "row": i, "message": f"Row {i}: '{col}' is null (not_null constraint)",
+                })
+            elif rule == "range" and value is not None:
+                min_val = constraint.get("min")
+                max_val = constraint.get("max")
+                if min_val is not None and value < min_val:
+                    violations.append({
+                        "type": "constraint", "field": col, "rule": rule,
+                        "row": i, "expected": f"{min_val}-{max_val}", "actual": value,
+                        "message": f"Row {i}: '{col}' value {value} below min {min_val}",
+                    })
+                if max_val is not None and value > max_val:
+                    violations.append({
+                        "type": "constraint", "field": col, "rule": rule,
+                        "row": i, "expected": f"{min_val}-{max_val}", "actual": value,
+                        "message": f"Row {i}: '{col}' value {value} above max {max_val}",
+                    })
+            elif rule == "enum" and value is not None:
+                allowed = constraint.get("values", [])
+                if value not in allowed:
+                    violations.append({
+                        "type": "constraint", "field": col, "rule": rule,
+                        "row": i, "expected": allowed, "actual": value,
+                        "message": f"Row {i}: '{col}' value '{value}' not in allowed values",
+                    })
+            elif rule == "regex" and value is not None:
+                import re
+                pattern = constraint.get("pattern", "")
+                if not re.match(pattern, str(value)):
+                    violations.append({
+                        "type": "constraint", "field": col, "rule": rule,
+                        "row": i, "expected": pattern, "actual": value,
+                        "message": f"Row {i}: '{col}' value '{value}' doesn't match pattern '{pattern}'",
+                    })
+
+    valid = len(violations) == 0
+    return {
+        "table": table_name,
+        "valid": valid,
+        "rows_checked": len(rows),
+        "violations": violations,
+        "violation_count": len(violations),
+        "message": f"Pre-write validation: {'PASS' if valid else f'FAIL ({len(violations)} violations)'} for {len(rows)} rows",
+    }
+
+
+def get_contract_violations(
+    catalog,
+    table_name: str,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Get current violations for a table."""
+    result = validate_contract(catalog, table_name, store_path=store_path)
+    summary = get_contract_summary(catalog, table_name, store_path=store_path)
+
+    violations = list(result.get("violations", []))
+
+    # Add quality violation if applicable
+    qc = summary.get("quality_check")
+    if qc and not qc.get("passing", True) and "error" not in qc:
+        violations.append({
+            "type": "quality", "field": None, "rule": "min_score",
+            "expected": qc["min_score"], "actual": qc["current_score"],
+            "message": f"Quality score {qc['current_score']:.0f} below threshold {qc['min_score']}",
+        })
+
+    # Add freshness violation if applicable
+    fc = summary.get("freshness_check")
+    if fc and not fc.get("passing", True) and "error" not in fc:
+        violations.append({
+            "type": "freshness", "field": None, "rule": "max_age_hours",
+            "expected": fc["max_age_hours"], "actual": fc["current_age_hours"],
+            "message": f"Table age {fc['current_age_hours']:.1f}h exceeds max {fc['max_age_hours']}h",
+        })
+
+    return {
+        "table": table_name,
+        "violations": violations,
+        "violation_count": len(violations),
+        "message": f"Violations for '{table_name}': {len(violations)} found",
+    }
+
+
+def _validate_constraint(conn, column: str, rule: str, constraint: dict) -> Optional[dict]:
+    """Validate a single constraint against table data in DuckDB."""
+    if rule == "not_null":
+        count = conn.execute(f'SELECT COUNT(*) FROM tbl WHERE "{column}" IS NULL').fetchone()[0]
+        if count > 0:
+            return {
+                "type": "constraint", "field": column, "rule": "not_null",
+                "message": f"'{column}': {count} null values violate not_null constraint",
+                "null_count": count,
+            }
+    elif rule == "range":
+        min_val = constraint.get("min")
+        max_val = constraint.get("max")
+        conditions = []
+        if min_val is not None:
+            conditions.append(f'"{column}" < {min_val}')
+        if max_val is not None:
+            conditions.append(f'"{column}" > {max_val}')
+        if conditions:
+            where = " OR ".join(conditions)
+            count = conn.execute(f'SELECT COUNT(*) FROM tbl WHERE {where}').fetchone()[0]
+            if count > 0:
+                return {
+                    "type": "constraint", "field": column, "rule": "range",
+                    "expected": f"{min_val}-{max_val}", "violation_count": count,
+                    "message": f"'{column}': {count} values outside range [{min_val}, {max_val}]",
+                }
+    elif rule == "enum":
+        allowed = constraint.get("values", [])
+        if allowed:
+            placeholders = ", ".join(f"'{v}'" for v in allowed)
+            count = conn.execute(f'SELECT COUNT(*) FROM tbl WHERE "{column}" NOT IN ({placeholders})').fetchone()[0]
+            if count > 0:
+                return {
+                    "type": "constraint", "field": column, "rule": "enum",
+                    "expected": allowed, "violation_count": count,
+                    "message": f"'{column}': {count} values not in allowed set",
+                }
+    return None

@@ -1777,6 +1777,40 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="validate_contract",
+            description="Validate current table state against its data contract. Checks schema conformance and constraint compliance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
+            name="validate_data_against_contract",
+            description="Validate a batch of rows against a table's contract before writing. Checks schema, nullability, range, enum constraints.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                    "rows": {"type": "array", "description": "Array of row objects to validate", "items": {"type": "object"}},
+                },
+                "required": ["table_name", "rows"],
+            },
+        ),
+        Tool(
+            name="get_contract_violations",
+            description="Get all current violations for a table including schema, constraint, quality, and freshness issues.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "Table name"},
+                },
+                "required": ["table_name"],
+            },
+        ),
+        Tool(
             name="dashboard",
             description="Get a comprehensive lakehouse status overview including all tables with row counts, sizes, health indicators, recent activity, and namespace summary. This is the 'home screen' for the lakehouse.",
             inputSchema={
@@ -4921,6 +4955,32 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Get contract summary failed: {str(e)}")]
+
+        elif name == "validate_contract":
+            try:
+                from .contracts import validate_contract
+                catalog = get_catalog()
+                result = validate_contract(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Validate contract failed: {str(e)}")]
+
+        elif name == "validate_data_against_contract":
+            try:
+                from .contracts import validate_data_against_contract
+                result = validate_data_against_contract(arguments["table_name"], arguments["rows"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Validate data against contract failed: {str(e)}")]
+
+        elif name == "get_contract_violations":
+            try:
+                from .contracts import get_contract_violations
+                catalog = get_catalog()
+                result = get_contract_violations(catalog, arguments["table_name"])
+                return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Get contract violations failed: {str(e)}")]
 
         elif name == "dashboard":
             try:
