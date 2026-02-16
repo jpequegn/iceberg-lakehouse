@@ -17,6 +17,9 @@ from lakehouse.contracts import (
     diff_contract_versions,
     deprecate_contract,
     get_contract_status,
+    monitor_contract,
+    get_compliance_history,
+    get_compliance_score,
 )
 from lakehouse.catalog import create_table, insert_rows
 
@@ -507,3 +510,101 @@ class TestGetContractStatus:
     def test_status_not_found(self, store):
         result = get_contract_status("nonexistent", store_path=store)
         assert result["status"] == "not_found"
+
+
+# --- monitor_contract ---
+
+
+class TestMonitorContract:
+    def test_monitor_records_compliance(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        result = monitor_contract(contract_table, "metrics", store_path=store)
+        assert result["checked"] is True
+        assert result["passed"] is True
+
+    def test_monitor_records_history(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        history = get_compliance_history("metrics", store_path=store)
+        assert len(history) == 1
+        assert history[0]["passed"] is True
+
+    def test_monitor_detects_violations(self, contract_table, store):
+        contract = {"schema": {"missing_col": {"type": "string"}}}
+        create_contract("metrics", contract, store_path=store)
+        result = monitor_contract(contract_table, "metrics", store_path=store)
+        assert result["passed"] is False
+        assert result["violation_count"] > 0
+
+    def test_monitor_fires_notification(self, contract_table, store, tmp_path):
+        """Violations should fire contract_violation event."""
+        from lakehouse.notifications import register_handler, get_event_history
+        notif_store = tmp_path / "notifications.json"
+
+        # Register a log handler for contract violations
+        log_file = tmp_path / "violations.log"
+        register_handler("*", "contract_violation", "log", {"file": str(log_file)}, store_path=notif_store)
+
+        contract = {"schema": {"missing_col": {"type": "string"}}}
+        create_contract("metrics", contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store, notification_store_path=notif_store)
+
+        history = get_event_history(store_path=notif_store)
+        assert len(history) >= 1
+        assert history[0]["event_type"] == "contract_violation"
+
+    def test_monitor_no_contract(self, contract_table, store):
+        result = monitor_contract(contract_table, "metrics", store_path=store)
+        assert result["checked"] is False
+
+
+# --- get_compliance_history ---
+
+
+class TestGetComplianceHistory:
+    def test_empty_history(self, store):
+        assert get_compliance_history("nonexistent", store_path=store) == []
+
+    def test_history_accumulates(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        monitor_contract(contract_table, "metrics", store_path=store)
+        history = get_compliance_history("metrics", store_path=store)
+        assert len(history) == 2
+
+    def test_history_limit(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        for _ in range(5):
+            monitor_contract(contract_table, "metrics", store_path=store)
+        history = get_compliance_history("metrics", limit=2, store_path=store)
+        assert len(history) == 2
+
+
+# --- get_compliance_score ---
+
+
+class TestGetComplianceScore:
+    def test_perfect_score(self, contract_table, store, sample_contract):
+        create_contract("metrics", sample_contract, store_path=store)
+        result = get_compliance_score(contract_table, "metrics", store_path=store)
+        assert result["score"] == 100.0
+        assert result["schema_ratio"] == 1.0
+        assert result["constraint_ratio"] == 1.0
+
+    def test_score_decreases_with_schema_violations(self, contract_table, store):
+        contract = {"schema": {"id": {"type": "long"}, "missing": {"type": "string"}}}
+        create_contract("metrics", contract, store_path=store)
+        result = get_compliance_score(contract_table, "metrics", store_path=store)
+        assert result["score"] < 100.0
+        assert result["schema_ratio"] < 1.0
+
+    def test_score_decreases_with_constraint_violations(self, contract_table, store):
+        contract = {"constraints": [{"column": "value", "rule": "range", "min": 0, "max": 5}]}
+        create_contract("metrics", contract, store_path=store)
+        result = get_compliance_score(contract_table, "metrics", store_path=store)
+        assert result["score"] < 100.0
+        assert result["constraint_ratio"] < 1.0
+
+    def test_score_no_contract(self, contract_table, store):
+        result = get_compliance_score(contract_table, "metrics", store_path=store)
+        assert result["score"] is None
