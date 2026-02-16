@@ -12,6 +12,11 @@ from lakehouse.contracts import (
     validate_contract,
     validate_data_against_contract,
     get_contract_violations,
+    get_contract_history,
+    get_contract_version,
+    diff_contract_versions,
+    deprecate_contract,
+    get_contract_status,
 )
 from lakehouse.catalog import create_table, insert_rows
 
@@ -350,3 +355,155 @@ class TestGetContractViolations:
         types = {v["type"] for v in result["violations"]}
         assert "schema" in types
         assert "constraint" in types
+
+
+# --- get_contract_history ---
+
+
+class TestGetContractHistory:
+    def test_empty_history_on_new_contract(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        history = get_contract_history("tbl", store_path=store)
+        assert history == []
+
+    def test_history_after_updates(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        update_contract("tbl", {"owner": "team-a"}, store_path=store)
+        update_contract("tbl", {"owner": "team-b"}, store_path=store)
+        history = get_contract_history("tbl", store_path=store)
+        assert len(history) == 2
+        # Most recent first
+        assert history[0]["owner"] == "team-a"
+        assert history[1]["owner"] == "data-team"
+
+    def test_history_limit(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        for i in range(5):
+            update_contract("tbl", {"description": f"v{i + 2}"}, store_path=store)
+        history = get_contract_history("tbl", limit=2, store_path=store)
+        assert len(history) == 2
+
+    def test_history_nonexistent(self, store):
+        assert get_contract_history("nonexistent", store_path=store) == []
+
+    def test_history_includes_snapshot_at(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        update_contract("tbl", {"owner": "new"}, store_path=store)
+        history = get_contract_history("tbl", store_path=store)
+        assert "snapshot_at" in history[0]
+
+
+# --- get_contract_version ---
+
+
+class TestGetContractVersion:
+    def test_get_current_version(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        result = get_contract_version("tbl", 1, store_path=store)
+        assert result is not None
+        assert result["version"] == 1
+
+    def test_get_historical_version(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        update_contract("tbl", {"owner": "new-team"}, store_path=store)
+        # Version 1 should be in history
+        v1 = get_contract_version("tbl", 1, store_path=store)
+        assert v1 is not None
+        assert v1["owner"] == "data-team"
+        # Current is version 2
+        v2 = get_contract_version("tbl", 2, store_path=store)
+        assert v2 is not None
+        assert v2["owner"] == "new-team"
+
+    def test_get_nonexistent_version(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        assert get_contract_version("tbl", 99, store_path=store) is None
+
+    def test_get_version_no_contract(self, store):
+        assert get_contract_version("nonexistent", 1, store_path=store) is None
+
+
+# --- diff_contract_versions ---
+
+
+class TestDiffContractVersions:
+    def test_diff_shows_changes(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        update_contract("tbl", {"owner": "new-team", "description": "updated"}, store_path=store)
+        diff = diff_contract_versions("tbl", 1, 2, store_path=store)
+        assert diff["change_count"] >= 2
+        fields_changed = {c["field"] for c in diff["changes"]}
+        assert "owner" in fields_changed
+        assert "description" in fields_changed
+
+    def test_diff_schema_added_column(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        new_schema = dict(sample_contract["schema"])
+        new_schema["email"] = {"type": "string", "nullable": True}
+        update_contract("tbl", {"schema": new_schema}, store_path=store)
+        diff = diff_contract_versions("tbl", 1, 2, store_path=store)
+        assert "email" in diff["schema_added"]
+
+    def test_diff_schema_removed_column(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        new_schema = {"id": {"type": "long", "nullable": True}}
+        update_contract("tbl", {"schema": new_schema}, store_path=store)
+        diff = diff_contract_versions("tbl", 1, 2, store_path=store)
+        assert "name" in diff["schema_removed"]
+        assert "value" in diff["schema_removed"]
+
+    def test_diff_nonexistent_version(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        diff = diff_contract_versions("tbl", 1, 99, store_path=store)
+        assert "error" in diff
+
+    def test_diff_no_changes(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        diff = diff_contract_versions("tbl", 1, 1, store_path=store)
+        assert diff["change_count"] == 0
+
+
+# --- deprecate_contract ---
+
+
+class TestDeprecateContract:
+    def test_deprecate(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        result = deprecate_contract("tbl", "Replaced by new table", store_path=store)
+        assert result["status"] == "deprecated"
+        contract = get_contract("tbl", store_path=store)
+        assert contract["status"] == "deprecated"
+        assert contract["deprecation_reason"] == "Replaced by new table"
+
+    def test_deprecate_with_sunset(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        deprecate_contract("tbl", "EOL", sunset_date="2026-06-01", store_path=store)
+        contract = get_contract("tbl", store_path=store)
+        assert contract["sunset_date"] == "2026-06-01"
+
+    def test_deprecate_nonexistent_raises(self, store):
+        with pytest.raises(ValueError, match="No contract found"):
+            deprecate_contract("nonexistent", "reason", store_path=store)
+
+
+# --- get_contract_status ---
+
+
+class TestGetContractStatus:
+    def test_active_status(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        result = get_contract_status("tbl", store_path=store)
+        assert result["status"] == "active"
+        assert result["version"] == 1
+
+    def test_deprecated_status(self, store, sample_contract):
+        create_contract("tbl", sample_contract, store_path=store)
+        deprecate_contract("tbl", "old", store_path=store)
+        result = get_contract_status("tbl", store_path=store)
+        assert result["status"] == "deprecated"
+        assert result["deprecation_reason"] == "old"
+        assert "deprecated_at" in result
+
+    def test_status_not_found(self, store):
+        result = get_contract_status("nonexistent", store_path=store)
+        assert result["status"] == "not_found"

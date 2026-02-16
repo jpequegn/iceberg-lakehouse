@@ -501,3 +501,165 @@ def _validate_constraint(conn, column: str, rule: str, constraint: dict) -> Opti
                     "message": f"'{column}': {count} values not in allowed set",
                 }
     return None
+
+
+def get_contract_history(
+    table_name: str,
+    limit: int = 20,
+    store_path: Optional[Path] = None,
+) -> list[dict]:
+    """Get version history of a contract."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return []
+
+    history = entry.get("_history", [])
+    # Return most recent first
+    result = list(reversed(history))[:limit]
+    return result
+
+
+def get_contract_version(
+    table_name: str,
+    version: int,
+    store_path: Optional[Path] = None,
+) -> Optional[dict]:
+    """Get a specific historical version of a contract."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return None
+
+    # Current version
+    current_version = entry.get("version", 1)
+    if version == current_version:
+        return {k: v for k, v in entry.items() if not k.startswith("_")}
+
+    # Search history
+    for snapshot in entry.get("_history", []):
+        if snapshot.get("version") == version:
+            return snapshot
+
+    return None
+
+
+def diff_contract_versions(
+    table_name: str,
+    v1: int,
+    v2: int,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Diff two contract versions showing added/removed/changed fields."""
+    table_name = _normalize(table_name)
+
+    ver1 = get_contract_version(table_name, v1, store_path=store_path)
+    ver2 = get_contract_version(table_name, v2, store_path=store_path)
+
+    if ver1 is None:
+        return {"error": f"Version {v1} not found for '{table_name}'"}
+    if ver2 is None:
+        return {"error": f"Version {v2} not found for '{table_name}'"}
+
+    changes = []
+    compare_fields = {"schema", "quality", "freshness", "constraints", "owner", "description"}
+
+    for field in compare_fields:
+        old_val = ver1.get(field)
+        new_val = ver2.get(field)
+        if old_val != new_val:
+            changes.append({
+                "field": field,
+                "from": old_val,
+                "to": new_val,
+            })
+
+    # Schema-level detail: added/removed columns
+    schema_added = []
+    schema_removed = []
+    schema_changed = []
+    s1 = ver1.get("schema", {})
+    s2 = ver2.get("schema", {})
+    for col in set(s2) - set(s1):
+        schema_added.append(col)
+    for col in set(s1) - set(s2):
+        schema_removed.append(col)
+    for col in set(s1) & set(s2):
+        if s1[col] != s2[col]:
+            schema_changed.append({"column": col, "from": s1[col], "to": s2[col]})
+
+    return {
+        "table": table_name,
+        "v1": v1,
+        "v2": v2,
+        "changes": changes,
+        "schema_added": schema_added,
+        "schema_removed": schema_removed,
+        "schema_changed": schema_changed,
+        "change_count": len(changes),
+        "message": f"Diff v{v1} → v{v2}: {len(changes)} field(s) changed",
+    }
+
+
+def deprecate_contract(
+    table_name: str,
+    reason: str,
+    sunset_date: Optional[str] = None,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Mark a contract as deprecated."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+
+    if table_name not in store:
+        raise ValueError(f"No contract found for '{table_name}'")
+
+    entry = store[table_name]
+    entry["status"] = "deprecated"
+    entry["deprecation_reason"] = reason
+    if sunset_date:
+        entry["sunset_date"] = sunset_date
+    entry["deprecated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    _save_store(store, store_path)
+
+    return {
+        "table": table_name,
+        "status": "deprecated",
+        "reason": reason,
+        "sunset_date": sunset_date,
+        "message": f"Contract for '{table_name}' marked as deprecated",
+    }
+
+
+def get_contract_status(
+    table_name: str,
+    store_path: Optional[Path] = None,
+) -> dict:
+    """Get lifecycle status of a contract."""
+    table_name = _normalize(table_name)
+    store = _load_store(store_path)
+    entry = store.get(table_name)
+
+    if entry is None:
+        return {"table": table_name, "status": "not_found", "message": f"No contract for '{table_name}'"}
+
+    status = entry.get("status", "active")
+    result = {
+        "table": table_name,
+        "status": status,
+        "version": entry.get("version", 1),
+        "created_at": entry.get("created_at", ""),
+        "updated_at": entry.get("updated_at", ""),
+    }
+
+    if status == "deprecated":
+        result["deprecation_reason"] = entry.get("deprecation_reason", "")
+        result["sunset_date"] = entry.get("sunset_date")
+        result["deprecated_at"] = entry.get("deprecated_at", "")
+
+    return result
